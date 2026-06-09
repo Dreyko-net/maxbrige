@@ -153,27 +153,19 @@ async def _run_auth(
             parse_mode="HTML",
         )
 
-        # Создаём супергруппу
-        user = await db.get_user(tg_user_id)
-        group_id = await _create_mirror_group(bot, me_name, tg_user_id)
-        if not group_id:
-            await bot.send_message(chat_id,
-                "❌ Не удалось создать группу. Создайте вручную и добавьте бота "
-                "администратором с правом управления темами.")
-            return
-
-        await db.set_user_group(tg_user_id, group_id)
-        user = await db.get_user(tg_user_id)
-
+        # Просим пользователя создать группу и переслать сообщение
         await bot.send_message(
             chat_id,
-            f"✅ Группа создана!\n"
-            f"🔄 Начинаю синхронизацию чатов…",
+            f"📌 <b>Создайте группу-зеркало:</b>\n\n"
+            f"1. Создайте новую супергруппу в Telegram\n"
+            f"2. Включите <b>Темы (Topics / Форум)</b> в настройках группы\n"
+            f"3. Добавьте этого бота администратором\n"
+            f"   (права: управление темами + отправка сообщений)\n"
+            f"4. Перешлите любое сообщение из этой группы в этот чат\n\n"
+            f"Жду пересланное сообщение…",
+            parse_mode="HTML",
         )
-
-        # Запускаем синхронизацию
-        sync = SyncWorker(bot=bot, manager=manager)
-        await sync.full_sync(user=user, client=client)
+        # Дальше флоу продолжается в handle_forwarded_group
 
     except TimeoutError:
         _pending_auth.pop(tg_user_id, None)
@@ -188,28 +180,3 @@ async def _run_auth(
             f"Попробуйте снова: /start",
             parse_mode="HTML",
         )
-
-
-async def _create_mirror_group(bot: Bot, me_name: str, tg_user_id: int) -> int | None:
-    """
-    Создаёт супергруппу-зеркало.
-
-    ВАЖНО: Telegram Bot API не позволяет ботам самостоятельно создавать группы.
-    Пользователь должен создать группу вручную, добавить бота администратором
-    и переслать любое сообщение из группы боту.
-
-    Здесь мы просим пользователя сделать это и ждём group_id.
-    """
-    # Инструкция пользователю
-    await bot.send_message(
-        tg_user_id,
-        "📌 <b>Необходимо создать группу вручную:</b>\n\n"
-        "1. Создайте новую супергруппу в Telegram\n"
-        "2. Включите <b>Темы (Topics)</b> в настройках группы\n"
-        "3. Добавьте этого бота администратором\n"
-        "   (нужны права: управление темами + отправка сообщений)\n"
-        "4. Перешлите любое сообщение из этой группы сюда\n\n"
-        "Жду пересланное сообщение…",
-        parse_mode="HTML",
-    )
-    return None  # group_id придёт через handle_forwarded_group
