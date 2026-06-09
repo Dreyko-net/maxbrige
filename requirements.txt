@@ -1,0 +1,5 @@
+aiogram==3.10.0
+maxapi-python>=2.1.2
+aiosqlite>=0.20.0
+aiofiles>=23.0.0
+python-dotenv>=1.0.0
