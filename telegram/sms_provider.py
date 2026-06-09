@@ -27,12 +27,13 @@ class TelegramSmsCodeProvider:
         self._event     = asyncio.Event()
         self._code: str = ""
 
-    async def get_sms_code(self) -> str:
+    async def get_code(self, phone: str) -> str:
         """Вызывается pymax. Ждёт пока пользователь введёт код."""
         await self.bot.send_message(
             chat_id = self.chat_id,
-            text    = "📱 На ваш номер отправлен SMS-код.\n"
-                      "Введите его в этот чат:",
+            text    = f"📱 На номер <code>{phone}</code> отправлен SMS-код.\n"
+                      f"Введите его в этот чат:",
+            parse_mode = "HTML",
         )
         # Ждём код от пользователя (таймаут 5 минут)
         try:
