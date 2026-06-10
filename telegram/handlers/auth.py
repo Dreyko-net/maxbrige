@@ -1,6 +1,6 @@
 """
 Хэндлеры авторизации пользователя.
-FSM: /start → WAIT_PHONE → WAIT_SMS → CONNECTED
+FSM: /start → WAIT_PHONE → WAIT_SMS → WAIT_GROUP → CONNECTED
 """
 
 from __future__ import annotations
@@ -29,21 +29,21 @@ _pending_auth: dict[int, TelegramSmsCodeProvider] = {}
 
 
 class AuthStates(StatesGroup):
-    WAIT_PHONE    = State()
-    WAIT_SMS      = State()
-    WAIT_GROUP    = State()   # ждём пересланное сообщение из группы
-    CONNECTED     = State()
+    WAIT_PHONE = State()
+    WAIT_SMS   = State()
+    WAIT_GROUP = State()
+    CONNECTED  = State()
 
+
+# ── Клавиатуры ────────────────────────────────────────────────────────────────
 
 def _step1_kb() -> InlineKeyboardMarkup:
-    """Шаг 1 — группа создана."""
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
     ]])
 
 
 def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
-    """Шаг 2 — добавить бота администратором."""
     add_url = (
         f"https://t.me/{bot_username}?startgroup=setup"
         f"&admin=manage_topics+post_messages+delete_messages"
@@ -54,23 +54,30 @@ def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _forward_hint_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="❓ Как переслать сообщение?", callback_data="forward_help"),
-    ]])
+# ── Тексты ────────────────────────────────────────────────────────────────────
+
+STEP1_TEXT = (
+    "🏗 <b>Шаг 1 из 2 — создайте группу-зеркало</b>\n\n"
+    "1. Откройте Telegram\n"
+    "2. Создайте новую супергруппу\n"
+    "3. Зайдите в <b>Настройки группы → Темы</b> и включите их\n\n"
+    "Нажмите кнопку когда группа готова."
+)
+
+STEP3_TEXT = (
+    "✅ Бот добавлен!\n\n"
+    "🔗 <b>Последний шаг — свяжите группу с ботом:</b>\n\n"
+    "1. Откройте вашу новую группу\n"
+    "2. Нажмите и удерживайте <b>любое сообщение</b> в группе\n"
+    "3. Выберите <b>Переслать</b>\n"
+    "4. В списке чатов найдите и выберите <b>этого бота</b> (личный чат)\n\n"
+    "⚠️ Важно: пересылать нужно <b>из группы боту</b>, не наоборот."
+)
 
 
-async def _send_group_instructions(bot: Bot, chat_id: int, tg_user_id: int):
-    await bot.send_message(
-        chat_id,
-        "🏗 <b>Шаг 1 из 2 — создайте группу-зеркало</b>\n\n"
-        "1. Откройте Telegram\n"
-        "2. Создайте новую супергруппу (Новая группа → добавьте любого участника)\n"
-        "3. Зайдите в <b>Настройки группы → Темы</b> и включите их\n\n"
-        "Нажмите кнопку когда группа готова.",
-        parse_mode="HTML",
-        reply_markup=_step1_kb(),
-    )
+async def _send_step1(bot: Bot, chat_id: int):
+    await bot.send_message(chat_id, STEP1_TEXT, parse_mode="HTML",
+                           reply_markup=_step1_kb())
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -95,20 +102,20 @@ async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
             return
 
         if client and not user.tg_group_id:
-            log.info("[/start] no group yet, showing setup")
-            await _send_group_instructions(bot, msg.chat.id, user_id)
+            await _send_step1(bot, msg.chat.id)
             await state.set_state(AuthStates.WAIT_GROUP)
             return
 
         log.info("[/start] client not in pool, reconnecting")
         await msg.answer("🔄 Переподключаюсь к MAX…")
-        asyncio.create_task(_reconnect(user_id, user.max_phone, bot, msg.chat.id, state))
+        asyncio.create_task(
+            _reconnect(user_id, user.max_phone, bot, msg.chat.id, state)
+        )
         return
 
     log.info("[/start] fresh auth flow")
     await msg.answer(
         "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
-        "Этот бот создаст зеркало ваших чатов MAX прямо в Telegram.\n\n"
         "Введите ваш номер телефона, зарегистрированный в MAX\n"
         "(формат: <code>+79001234567</code>):",
         parse_mode="HTML",
@@ -132,8 +139,10 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
     provider = TelegramSmsCodeProvider(tg_user_id=tg_user_id, bot=bot, chat_id=msg.chat.id)
     _pending_auth[tg_user_id] = provider
 
-    await msg.answer(f"📲 Подключаюсь к MAX с номером <code>{phone}</code>…", parse_mode="HTML")
-
+    await msg.answer(
+        f"📲 Подключаюсь к MAX с номером <code>{phone}</code>…",
+        parse_mode="HTML",
+    )
     await db.create_user(
         tg_user_id   = tg_user_id,
         tg_username  = msg.from_user.username,
@@ -141,7 +150,6 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
         session_path = session_path_for(tg_user_id),
     )
     await state.set_state(AuthStates.WAIT_SMS)
-
     asyncio.create_task(
         _run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider,
                   bot=bot, chat_id=msg.chat.id, state=state)
@@ -169,7 +177,7 @@ async def handle_sms_code(msg: Message, state: FSMContext):
     await msg.answer("🔐 Проверяю код…")
 
 
-# ── Callback: группа создана (шаг 1) ─────────────────────────────────────────
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "group_created")
 async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -177,8 +185,8 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
     await callback.message.edit_reply_markup(reply_markup=None)
     me = await bot.get_me()
     await callback.message.answer(
-        "✅ Отлично!"
-        "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>"
+        "✅ Отлично!\n\n"
+        "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
         "Нажмите кнопку ниже — Telegram предложит выбрать вашу группу "
         "и автоматически назначит бота администратором с нужными правами.",
         parse_mode="HTML",
@@ -186,32 +194,12 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
     )
 
 
-# ── Callback: бот добавлен в группу (шаг 2) ──────────────────────────────────
-
 @router.callback_query(F.data == "group_added")
 async def cb_group_added(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        "✅ Бот добавлен!"
-        "🔗 <b>Последний шаг — свяжите группу с ботом:</b>"
-        "1. Зайдите в созданную группу"
-        "2. Нажмите на любое сообщение → <b>Переслать</b>"
-        "3. Выберите получателем <b>этого бота</b>"
-        "Бот определит группу и начнёт синхронизацию.",
-        parse_mode="HTML",
-        reply_markup=_forward_hint_kb(),
-    )
+    await callback.message.answer(STEP3_TEXT, parse_mode="HTML")
     await state.set_state(AuthStates.WAIT_GROUP)
-
-
-@router.callback_query(F.data == "forward_help")
-async def cb_forward_help(callback: CallbackQuery):
-    await callback.answer(
-        "Откройте группу → долгое нажатие на сообщение → "
-        "Переслать → найдите этого бота в списке",
-        show_alert=True,
-    )
 
 
 # ── Пересланное сообщение из группы ──────────────────────────────────────────
@@ -238,35 +226,34 @@ async def handle_forwarded_group(msg: Message, state: FSMContext, bot: Bot):
         if member.status not in ("administrator", "creator"):
             await msg.answer(
                 "❌ Бот не является администратором этой группы.\n"
-                "Добавьте его через кнопку выше и попробуйте снова."
+                "Добавьте его через кнопку на шаге 2 и попробуйте снова."
             )
             return
     except Exception as e:
-        await msg.answer(f"❌ Не могу получить доступ к группе: <code>{e}</code>",
-                         parse_mode="HTML")
+        await msg.answer(
+            f"❌ Не могу получить доступ к группе: <code>{e}</code>",
+            parse_mode="HTML",
+        )
         return
 
-    # Проверяем включены ли Topics
+    # Проверяем Topics
     try:
         chat_info = await bot.get_chat(group_id)
         if not getattr(chat_info, "is_forum", False):
             await msg.answer(
                 "⚠️ В группе не включены <b>Темы (Topics)</b>.\n\n"
-                "Включите их: Настройки группы → Темы → Включить\n"
+                "Включите: Настройки группы → Темы → Включить\n"
                 "Затем снова перешлите сообщение сюда.",
                 parse_mode="HTML",
             )
             return
     except Exception:
-        pass  # Если не можем проверить — продолжаем
+        pass
 
     await db.set_user_group(tg_user_id, group_id)
     user = await db.get_user(tg_user_id)
 
-    await msg.answer(
-        "✅ Группа подключена! Начинаю синхронизацию чатов MAX…\n"
-        "Прогресс буду отправлять в группу."
-    )
+    await msg.answer("✅ Группа подключена! Начинаю синхронизацию чатов MAX…")
     await state.set_state(AuthStates.CONNECTED)
 
     client = manager.get_client(tg_user_id)
@@ -277,7 +264,7 @@ async def handle_forwarded_group(msg: Message, state: FSMContext, bot: Bot):
         await msg.answer("⚠️ Клиент MAX не найден. Попробуйте /start")
 
 
-# ── Фоновая авторизация ───────────────────────────────────────────────────────
+# ── Фоновые функции ───────────────────────────────────────────────────────────
 
 async def _run_auth(tg_user_id, phone, provider, bot, chat_id, state):
     log.info("[auth] _run_auth started user=%s", tg_user_id)
@@ -296,9 +283,9 @@ async def _run_auth(tg_user_id, phone, provider, bot, chat_id, state):
             f"✅ Авторизован в MAX как <b>{me_name}</b>",
             parse_mode="HTML",
         )
-        await _send_group_instructions(bot, chat_id, tg_user_id)
+        await _send_step1(bot, chat_id)
 
-    except (asyncio.CancelledError,):
+    except asyncio.CancelledError:
         log.info("[auth] cancelled user=%s", tg_user_id)
         _pending_auth.pop(tg_user_id, None)
         await state.clear()
@@ -321,11 +308,14 @@ async def _reconnect(tg_user_id, phone, bot, chat_id, state):
         log.info("[reconnect] done user=%s", tg_user_id)
         user = await db.get_user(tg_user_id)
         if user and not user.tg_group_id:
-            await _send_group_instructions(bot, chat_id, tg_user_id)
+            await _send_step1(bot, chat_id)
             await state.set_state(AuthStates.WAIT_GROUP)
         else:
             await bot.send_message(chat_id, "✅ Переподключено к MAX.")
     except Exception as e:
         log.error("[reconnect] error user=%s: %s", tg_user_id, e, exc_info=True)
-        await bot.send_message(chat_id,
-            f"❌ Ошибка переподключения: <code>{e}</code>", parse_mode="HTML")
+        await bot.send_message(
+            chat_id,
+            f"❌ Ошибка переподключения: <code>{e}</code>",
+            parse_mode="HTML",
+        )
