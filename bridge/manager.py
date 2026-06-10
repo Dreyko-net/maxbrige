@@ -1,9 +1,5 @@
 """
 BridgeManager — центральный координатор.
-
-- Хранит пул MaxUserClient (один на пользователя)
-- При старте восстанавливает сессии из БД
-- Запускает воркеры очередей max→tg и tg→max
 """
 
 from __future__ import annotations
@@ -26,7 +22,6 @@ log = logging.getLogger(__name__)
 
 class BridgeManager:
     def __init__(self):
-        # tg_user_id → MaxUserClient
         self._clients:  dict[int, MaxUserClient] = {}
         self._tasks:    list[asyncio.Task]        = []
         self._bot:      Optional["Bot"]           = None
@@ -37,19 +32,15 @@ class BridgeManager:
         if self._sync:
             self._sync.bot = bot
 
-    # ── Жизненный цикл ───────────────────────────────────────────────────────
-
     async def start(self, bot: "Bot"):
         self.set_bot(bot)
         self._sync = SyncWorker(bot=bot, manager=self)
 
-        # Восстанавливаем сессии всех активных пользователей
         users = await db.get_active_users()
         log.info("Restoring %d user sessions…", len(users))
         for user in users:
             await self._restore_client(user)
 
-        # Воркеры очередей
         self._tasks.append(asyncio.create_task(self._worker_max_to_tg()))
         self._tasks.append(asyncio.create_task(self._worker_tg_to_max()))
         self._tasks.append(asyncio.create_task(self._purge_media_loop()))
@@ -69,30 +60,36 @@ class BridgeManager:
         max_phone: str,
         sms_code_provider,
     ) -> MaxUserClient:
-        """
-        Создаёт и запускает клиент для нового пользователя.
-        sms_code_provider — объект, реализующий SmsCodeProvider.
-        Возвращает клиент после успешной авторизации.
-        """
         path = session_path_for(tg_user_id)
+        log.info("[user=%s] connect_user started, path=%s", tg_user_id, path)
 
         client = MaxUserClient(
-            tg_user_id       = tg_user_id,
-            max_phone        = max_phone,
-            session_path     = path,
+            tg_user_id        = tg_user_id,
+            max_phone         = max_phone,
+            session_path      = path,
             sms_code_provider = sms_code_provider,
         )
+
+        log.info("[user=%s] calling client.start()", tg_user_id)
         await client.start()
+        log.info("[user=%s] client.start() done, me=%s", tg_user_id, client.me)
+
         self._clients[tg_user_id] = client
-
-        # Запускаем run_forever в фоне
-        task = asyncio.create_task(client.run())
+        task = asyncio.create_task(self._run_client(client))
         self._tasks.append(task)
-
         return client
 
+    async def _run_client(self, client: MaxUserClient):
+        """Запускает run_forever с логированием ошибок."""
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error("[user=%s] MAX client crashed: %s", client.tg_user_id, e,
+                      exc_info=True)
+
     async def _restore_client(self, user: User):
-        """Восстанавливает сессию существующего пользователя (без SMS)."""
         try:
             client = MaxUserClient(
                 tg_user_id   = user.tg_user_id,
@@ -101,12 +98,12 @@ class BridgeManager:
             )
             await client.start()
             self._clients[user.tg_user_id] = client
-            task = asyncio.create_task(client.run())
+            task = asyncio.create_task(self._run_client(client))
             self._tasks.append(task)
             log.info("Session restored for user %s", user.tg_user_id)
         except Exception as e:
             log.error("Failed to restore session for user %s: %s",
-                      user.tg_user_id, e)
+                      user.tg_user_id, e, exc_info=True)
 
     def get_client(self, tg_user_id: int) -> Optional[MaxUserClient]:
         return self._clients.get(tg_user_id)
@@ -123,7 +120,7 @@ class BridgeManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.error("max→tg worker error: %s", e)
+                log.error("max→tg worker error: %s", e, exc_info=True)
 
     async def _handle_max_to_tg(self, event: BridgeEvent):
         from telegram.sender import send_to_telegram
@@ -157,7 +154,7 @@ class BridgeManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.error("tg→max worker error: %s", e)
+                log.error("tg→max worker error: %s", e, exc_info=True)
 
     async def _handle_tg_to_max(self, event: BridgeEvent):
         client = self.get_client(event.tg_user_id)
@@ -181,7 +178,6 @@ class BridgeManager:
     # ── Очистка медиакэша ─────────────────────────────────────────────────────
 
     async def _purge_media_loop(self):
-        """Каждые 30 минут удаляет просроченные записи медиакэша."""
         while True:
             try:
                 await asyncio.sleep(1800)
