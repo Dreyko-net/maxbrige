@@ -21,7 +21,6 @@ from bridge.max_client import session_path_for
 from database import db
 from telegram.sms_provider import TelegramSmsCodeProvider
 from bridge.sync_worker import SyncWorker
-from config import CONTROL_TOPIC_NAME
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -36,25 +35,56 @@ class AuthStates(StatesGroup):
     CONNECTED  = State()
 
 
+GROUP_INSTRUCTIONS = (
+    "📌 <b>Создайте группу-зеркало:</b>\n\n"
+    "1. Создайте новую супергруппу в Telegram\n"
+    "2. Включите <b>Темы (Topics / Форум)</b> в настройках группы\n"
+    "3. Добавьте этого бота администратором\n"
+    "   (права: управление темами + отправка сообщений)\n"
+    "4. Перешлите любое сообщение из этой группы в этот чат\n\n"
+    "Жду пересланное сообщение…"
+)
+
+
 # ── /start ────────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
     user_id = msg.from_user.id
+    log.info("[/start] user_id=%s", user_id)
+
     user = await db.get_user(user_id)
+    log.info("[/start] db_user=%s status=%s tg_group_id=%s",
+             user.id if user else None,
+             user.status if user else None,
+             user.tg_group_id if user else None)
 
     if user and user.status == "active":
         client = manager.get_client(user_id)
-        if client:
-            await msg.answer(
-                "✅ Вы уже подключены к MAX.\n"
-                "Все сообщения зеркалируются в вашу группу."
-            )
+        log.info("[/start] client_in_pool=%s", client is not None)
+
+        if client and user.tg_group_id:
+            await msg.answer("✅ Вы уже подключены к MAX.\nВсе сообщения зеркалируются в вашу группу.")
             return
 
+        if client and not user.tg_group_id:
+            # MAX подключён, но группа ещё не создана
+            log.info("[/start] client connected but no group yet, showing instructions")
+            await msg.answer(GROUP_INSTRUCTIONS, parse_mode="HTML")
+            await state.set_state(AuthStates.CONNECTED)
+            return
+
+        # Клиента нет в пуле (перезапуск не восстановил) — переподключаем
+        log.info("[/start] user is active but client not in pool, reconnecting")
+        await msg.answer("🔄 Переподключаюсь к MAX…")
+        asyncio.create_task(
+            _reconnect(user_id, user.max_phone, bot, msg.chat.id, state)
+        )
+        return
+
+    log.info("[/start] no active user, starting fresh auth flow")
     await msg.answer(
         "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
-        "Этот бот создаст зеркало ваших чатов MAX прямо в Telegram.\n\n"
         "Введите ваш номер телефона, зарегистрированный в MAX\n"
         "(формат: <code>+79001234567</code>):",
         parse_mode="HTML",
@@ -72,9 +102,9 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
         return
 
     tg_user_id = msg.from_user.id
+    log.info("[auth] phone entered user=%s phone=%s", tg_user_id, phone)
     await state.update_data(phone=phone)
 
-    # Создаём провайдер кода — он будет ждать SMS
     provider = TelegramSmsCodeProvider(
         tg_user_id = tg_user_id,
         bot        = bot,
@@ -85,7 +115,6 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
     await msg.answer(f"📲 Подключаюсь к MAX с номером <code>{phone}</code>…",
                      parse_mode="HTML")
 
-    # Создаём пользователя в БД
     await db.create_user(
         tg_user_id   = tg_user_id,
         tg_username  = msg.from_user.username,
@@ -95,7 +124,6 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
 
     await state.set_state(AuthStates.WAIT_SMS)
 
-    # Запускаем авторизацию в фоне — она остановится и подождёт SMS-код
     asyncio.create_task(
         _run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider,
                   bot=bot, chat_id=msg.chat.id, state=state)
@@ -112,13 +140,13 @@ async def handle_sms_code(msg: Message, state: FSMContext):
         return
 
     tg_user_id = msg.from_user.id
+    log.info("[auth] sms code entered user=%s", tg_user_id)
     provider = _pending_auth.get(tg_user_id)
     if not provider:
         await msg.answer("⚠️ Сессия устарела. Начните заново: /start")
         await state.clear()
         return
 
-    # Передаём код провайдеру — он разбудит ждущий asyncio.Event
     provider.set_code(code)
     await msg.answer("🔐 Проверяю код…")
 
@@ -133,50 +161,63 @@ async def _run_auth(
     chat_id:    int,
     state:      FSMContext,
 ):
+    log.info("[auth] _run_auth started user=%s", tg_user_id)
     try:
         client = await manager.connect_user(
             tg_user_id        = tg_user_id,
             max_phone         = phone,
             sms_code_provider = provider,
         )
-        log.info("connect_user done, client.me=%s", client.me)  # ← добавить
-        # Авторизация прошла
+        log.info("[auth] connect_user done user=%s me=%s", tg_user_id, client.me)
+
         _pending_auth.pop(tg_user_id, None)
         await db.set_user_active(tg_user_id)
+        log.info("[auth] user set active user=%s", tg_user_id)
+
         await state.set_state(AuthStates.CONNECTED)
 
         me_name = getattr(client.me, "name", phone) or phone
+        log.info("[auth] sending success message user=%s me_name=%s", tg_user_id, me_name)
+
         await bot.send_message(
             chat_id,
-            f"✅ Авторизован в MAX как <b>{me_name}</b>\n\n"
-            f"🏗 Создаю вашу группу-зеркало в Telegram…",
+            f"✅ Авторизован в MAX как <b>{me_name}</b>",
             parse_mode="HTML",
         )
+        await bot.send_message(chat_id, GROUP_INSTRUCTIONS, parse_mode="HTML")
+        log.info("[auth] instructions sent user=%s", tg_user_id)
 
-        # Просим пользователя создать группу и переслать сообщение
-        await bot.send_message(
-            chat_id,
-            f"📌 <b>Создайте группу-зеркало:</b>\n\n"
-            f"1. Создайте новую супергруппу в Telegram\n"
-            f"2. Включите <b>Темы (Topics / Форум)</b> в настройках группы\n"
-            f"3. Добавьте этого бота администратором\n"
-            f"   (права: управление темами + отправка сообщений)\n"
-            f"4. Перешлите любое сообщение из этой группы в этот чат\n\n"
-            f"Жду пересланное сообщение…",
-            parse_mode="HTML",
-        )
-        # Дальше флоу продолжается в handle_forwarded_group
-
-    except (TimeoutError, asyncio.CancelledError):
+    except (asyncio.CancelledError,):
+        log.info("[auth] cancelled (sms timeout) user=%s", tg_user_id)
         _pending_auth.pop(tg_user_id, None)
         await state.clear()
     except Exception as e:
-        log.error("Auth error for user %s: %s", tg_user_id, e)
+        log.error("[auth] error user=%s: %s", tg_user_id, e, exc_info=True)
         _pending_auth.pop(tg_user_id, None)
         await state.clear()
         await bot.send_message(
             chat_id,
-            f"❌ Ошибка авторизации: <code>{e}</code>\n"
-            f"Попробуйте снова: /start",
+            f"❌ Ошибка авторизации: <code>{e}</code>\nПопробуйте снова: /start",
             parse_mode="HTML",
         )
+
+
+async def _reconnect(tg_user_id: int, phone: str, bot: Bot, chat_id: int, state: FSMContext):
+    """Переподключает существующего пользователя без SMS (сессия есть на диске)."""
+    log.info("[reconnect] starting user=%s", tg_user_id)
+    try:
+        client = await manager.connect_user(
+            tg_user_id        = tg_user_id,
+            max_phone         = phone,
+            sms_code_provider = None,
+        )
+        log.info("[reconnect] done user=%s me=%s", tg_user_id, client.me)
+        user = await db.get_user(tg_user_id)
+        if user and not user.tg_group_id:
+            await bot.send_message(chat_id, GROUP_INSTRUCTIONS, parse_mode="HTML")
+            await state.set_state(AuthStates.CONNECTED)
+        else:
+            await bot.send_message(chat_id, "✅ Переподключено к MAX.")
+    except Exception as e:
+        log.error("[reconnect] error user=%s: %s", tg_user_id, e, exc_info=True)
+        await bot.send_message(chat_id, f"❌ Ошибка переподключения: <code>{e}</code>", parse_mode="HTML")
