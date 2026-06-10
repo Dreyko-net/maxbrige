@@ -167,7 +167,7 @@ async def _run_auth(
         )
         # Дальше флоу продолжается в handle_forwarded_group
 
-    except TimeoutError:
+    except (TimeoutError, asyncio.CancelledError):
         _pending_auth.pop(tg_user_id, None)
         await state.clear()
     except Exception as e:

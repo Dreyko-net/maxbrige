@@ -60,7 +60,16 @@ class MaxUserClient:
         """Запускает клиент. При наличии сессии — без SMS."""
         self._client = self._build_client()
         self._register_handlers()
-        self.me = await self._client.start()
+        try:
+            self.me = await self._client.start()
+        except asyncio.CancelledError:
+            # SMS-провайдер отменил авторизацию (таймаут)
+            # Останавливаем клиент чтобы pymax не ушёл в reconnect
+            try:
+                await self._client.stop()
+            except Exception:
+                pass
+            raise
         log.info("[user=%s] MAX connected as %s", self.tg_user_id,
                  getattr(self.me, "name", self.max_phone))
         if self.on_ready:
