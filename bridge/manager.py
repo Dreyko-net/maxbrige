@@ -75,8 +75,6 @@ class BridgeManager:
         log.info("[user=%s] client.start() done, me=%s", tg_user_id, client.me)
 
         self._clients[tg_user_id] = client
-        task = asyncio.create_task(self._run_client(client))
-        self._tasks.append(task)
         return client
 
     async def _run_client(self, client: MaxUserClient):
@@ -98,8 +96,6 @@ class BridgeManager:
             )
             await client.start()
             self._clients[user.tg_user_id] = client
-            task = asyncio.create_task(self._run_client(client))
-            self._tasks.append(task)
             log.info("Session restored for user %s", user.tg_user_id)
         except Exception as e:
             log.error("Failed to restore session for user %s: %s",
