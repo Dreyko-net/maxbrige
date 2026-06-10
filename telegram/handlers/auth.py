@@ -35,49 +35,41 @@ class AuthStates(StatesGroup):
     CONNECTED     = State()
 
 
-def _group_setup_kb(bot_username: str) -> InlineKeyboardMarkup:
-    """
-    Кнопки для настройки группы.
-    Telegram позволяет открыть диалог добавления бота в группу через
-    специальную ссылку t.me/<bot>?startgroup=setup&admin=...
-    """
+def _step1_kb() -> InlineKeyboardMarkup:
+    """Шаг 1 — группа создана."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
+    ]])
+
+
+def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
+    """Шаг 2 — добавить бота администратором."""
     add_url = (
         f"https://t.me/{bot_username}?startgroup=setup"
         f"&admin=manage_topics+post_messages+delete_messages"
     )
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="➕ Создать группу и добавить бота",
-            url=add_url,
-        )],
-        [InlineKeyboardButton(
-            text="✅ Я добавил бота в группу",
-            callback_data="group_added",
-        )],
+        [InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url)],
+        [InlineKeyboardButton(text="✅ Бот добавлен", callback_data="group_added")],
     ])
 
 
 def _forward_hint_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="❓ Как переслать сообщение?",
-            callback_data="forward_help",
-        )
+        InlineKeyboardButton(text="❓ Как переслать сообщение?", callback_data="forward_help"),
     ]])
 
 
 async def _send_group_instructions(bot: Bot, chat_id: int, tg_user_id: int):
-    me = await bot.get_me()
-    bot_username = me.username
     await bot.send_message(
         chat_id,
         "🏗 <b>Шаг 1 из 2 — создайте группу-зеркало</b>\n\n"
-        "Нажмите кнопку ниже — Telegram предложит выбрать группу "
-        "или создать новую. Бот будет добавлен администратором автоматически.\n\n"
-        "<b>Важно:</b> после создания группы включите в её настройках "
-        "<b>Темы (Topics / Форум)</b>.",
+        "1. Откройте Telegram\n"
+        "2. Создайте новую супергруппу (Новая группа → добавьте любого участника)\n"
+        "3. Зайдите в <b>Настройки группы → Темы</b> и включите их\n\n"
+        "Нажмите кнопку когда группа готова.",
         parse_mode="HTML",
-        reply_markup=_group_setup_kb(bot_username),
+        reply_markup=_step1_kb(),
     )
 
 
@@ -177,19 +169,48 @@ async def handle_sms_code(msg: Message, state: FSMContext):
     await msg.answer("🔐 Проверяю код…")
 
 
-# ── Callback: пользователь нажал "Я добавил бота" ────────────────────────────
+# ── Callback: группа создана (шаг 1) ─────────────────────────────────────────
+
+@router.callback_query(F.data == "group_created")
+async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    me = await bot.get_me()
+    await callback.message.answer(
+        "✅ Отлично!
+
+"
+        "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>
+
+"
+        "Нажмите кнопку ниже — Telegram предложит выбрать вашу группу "
+        "и автоматически назначит бота администратором с нужными правами.",
+        parse_mode="HTML",
+        reply_markup=_step2_kb(me.username),
+    )
+
+
+# ── Callback: бот добавлен в группу (шаг 2) ──────────────────────────────────
 
 @router.callback_query(F.data == "group_added")
 async def cb_group_added(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "✅ Отлично!\n\n"
-        "<b>Шаг 2 из 2</b> — свяжите группу с ботом:\n\n"
-        "1. Зайдите в созданную группу\n"
-        "2. Нажмите на любое сообщение → <b>Переслать</b>\n"
-        "3. Выберите получателем <b>этого бота</b>\n\n"
-        "Бот автоматически определит группу и начнёт синхронизацию.",
+        "✅ Бот добавлен!
+
+"
+        "🔗 <b>Последний шаг — свяжите группу с ботом:</b>
+
+"
+        "1. Зайдите в созданную группу
+"
+        "2. Нажмите на любое сообщение → <b>Переслать</b>
+"
+        "3. Выберите получателем <b>этого бота</b>
+
+"
+        "Бот определит группу и начнёт синхронизацию.",
         parse_mode="HTML",
         reply_markup=_forward_hint_kb(),
     )
