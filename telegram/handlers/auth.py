@@ -177,12 +177,8 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
     await callback.message.edit_reply_markup(reply_markup=None)
     me = await bot.get_me()
     await callback.message.answer(
-        "✅ Отлично!
-
-"
-        "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>
-
-"
+        "✅ Отлично!"
+        "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>"
         "Нажмите кнопку ниже — Telegram предложит выбрать вашу группу "
         "и автоматически назначит бота администратором с нужными правами.",
         parse_mode="HTML",
@@ -197,19 +193,11 @@ async def cb_group_added(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "✅ Бот добавлен!
-
-"
-        "🔗 <b>Последний шаг — свяжите группу с ботом:</b>
-
-"
-        "1. Зайдите в созданную группу
-"
-        "2. Нажмите на любое сообщение → <b>Переслать</b>
-"
-        "3. Выберите получателем <b>этого бота</b>
-
-"
+        "✅ Бот добавлен!"
+        "🔗 <b>Последний шаг — свяжите группу с ботом:</b>"
+        "1. Зайдите в созданную группу"
+        "2. Нажмите на любое сообщение → <b>Переслать</b>"
+        "3. Выберите получателем <b>этого бота</b>"
         "Бот определит группу и начнёт синхронизацию.",
         parse_mode="HTML",
         reply_markup=_forward_hint_kb(),
