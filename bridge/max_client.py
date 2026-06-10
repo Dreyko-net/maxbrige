@@ -150,6 +150,7 @@ class MaxUserClient:
             return None
 
     async def get_chats(self) -> list:
+        log.info("[user=%s] get_chats: %s", self.tg_user_id,self._client.get_chats())
         try:
             return await self._client.get_chats() or []
         except Exception as e:
