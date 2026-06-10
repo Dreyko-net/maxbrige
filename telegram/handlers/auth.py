@@ -139,7 +139,7 @@ async def _run_auth(
             max_phone         = phone,
             sms_code_provider = provider,
         )
-
+        log.info("connect_user done, client.me=%s", client.me)  # ← добавить
         # Авторизация прошла
         _pending_auth.pop(tg_user_id, None)
         await db.set_user_active(tg_user_id)
