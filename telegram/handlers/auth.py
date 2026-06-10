@@ -203,17 +203,29 @@ async def cb_group_added(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AuthStates.WAIT_GROUP)
 
 
+# ── Статус бота в группе ──────────────────────────────────────────
+@router.message(AuthStates.WAIT_GROUP,  F.forward_origin )
+async def handle_status_bot_in_group(msg: Message, state: FSMContext, bot: Bot):
+    tg_user_id = msg.from_user.id
+    user = await db.get_user(tg_user_id)
+    if not user:
+        return
+    log.info("[DEBUG] WAIT_GROUP Данные msg=%s", msg)
+    log.info("[DEBUG] WAIT_GROUP Данные state=%s", state)
+    log.info("[DEBUG] WAIT_GROUP Данные bot=%s", bot)
+
+    await msg.answer("✅ Группа подключена! Начинаю синхронизацию чатов MAX…")
+    #await state.set_state(AuthStates.CONNECTED)
+
 # ── Пересланное сообщение из группы ──────────────────────────────────────────
 
 @router.message(AuthStates.WAIT_GROUP, F.forward_origin )
+@router.message(AuthStates.CONNECTED,  F.forward_origin )
 async def handle_forwarded_group(msg: Message, state: FSMContext, bot: Bot):
     tg_user_id = msg.from_user.id
     user = await db.get_user(tg_user_id)
     if not user:
         return
-    log.info("[DEBUG] Данные msg=%s", msg)
-    log.info("[DEBUG] Данные state=%s", state)
-    log.info("[DEBUG] Данные bot=%s", bot)
 # event_context:
 #   chat:
 # type: supergroup
