@@ -23,8 +23,8 @@ router = Router()
 
 # ── Регистрация группы (пересланное сообщение) ────────────────────────────────
 
-@router.message(AuthStates.CONNECTED, F.forward_from_chat)
-@router.message(F.forward_from_chat)
+@router.message(AuthStates.CONNECTED, F.forward_origin )
+@router.message(F.forward_origin )
 async def handle_forwarded_group(msg: Message, bot: Bot):
     """
     Пользователь переслал сообщение из группы.
@@ -35,7 +35,7 @@ async def handle_forwarded_group(msg: Message, bot: Bot):
     if not user:
         return
 
-    group = msg.forward_from_chat
+    group = msg.forward_origin 
     if not group or group.type not in ("supergroup", "group"):
         await msg.answer("❌ Перешлите сообщение из <b>супергруппы</b>.",
                          parse_mode="HTML")
@@ -184,8 +184,8 @@ from telegram.handlers.auth import AuthStates
 
 @router.message(AuthStates.WAIT_GROUP)
 async def debug_wait_group(msg: Message):
-    log.info("[DEBUG] WAIT_GROUP got message: content_type=%s forward_from_chat=%s forward_origin=%s",
+    log.info("[DEBUG] WAIT_GROUP got message: content_type=%s forward_origin =%s forward_origin=%s",
              msg.content_type,
-             msg.forward_from_chat,
+             msg.forward_origin ,
              getattr(msg, 'forward_origin', None))
-    await msg.answer(f"DEBUG: content_type={msg.content_type}, forward_from_chat={msg.forward_from_chat}")
+    await msg.answer(f"DEBUG: content_type={msg.content_type}, forward_origin ={msg.forward_origin }")

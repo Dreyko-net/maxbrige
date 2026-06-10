@@ -204,15 +204,15 @@ async def cb_group_added(callback: CallbackQuery, state: FSMContext):
 
 # ── Пересланное сообщение из группы ──────────────────────────────────────────
 
-@router.message(AuthStates.WAIT_GROUP, F.forward_from_chat)
-@router.message(AuthStates.CONNECTED,  F.forward_from_chat)
+@router.message(AuthStates.WAIT_GROUP, F.forward_origin )
+@router.message(AuthStates.CONNECTED,  F.forward_origin )
 async def handle_forwarded_group(msg: Message, state: FSMContext, bot: Bot):
     tg_user_id = msg.from_user.id
     user = await db.get_user(tg_user_id)
     if not user:
         return
 
-    group = msg.forward_from_chat
+    group = msg.forward_origin 
     if not group or group.type not in ("supergroup", "group"):
         await msg.answer("❌ Перешлите сообщение из <b>супергруппы</b>.", parse_mode="HTML")
         return
