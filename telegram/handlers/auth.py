@@ -212,7 +212,13 @@ async def handle_forwarded_group(msg: Message, state: FSMContext, bot: Bot):
     user = await db.get_user(tg_user_id)
     if not user:
         return
-
+    log.info("[DEBUG] Данные msg=%s", msg)
+    log.info("[DEBUG] Данные state=%s", state)
+    log.info("[DEBUG] Данные bot=%s", bot)
+# event_context:
+#   chat:
+# type: supergroup
+# is_forum: True
     group = msg.forward_origin 
     if not group or group.type not in ("supergroup", "group"):
         log.info("[DEBUG] Данные группы=%s", group)
