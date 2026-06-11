@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from aiogram.exceptions import TelegramRetryAfter
 from database import db, User, Chat
 from config import HISTORY_DAYS, FLOOD_SLEEP, CONTROL_TOPIC_NAME
 
@@ -74,7 +75,7 @@ class SyncWorker:
                 if topic_id:
                     await db.set_topic_id(db_chat.id, topic_id)
                     db_chat.tg_topic_id = topic_id
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(2)
 
             db_chats.append(db_chat)
 
@@ -189,21 +190,36 @@ class SyncWorker:
                     pass
 
     async def _create_topic(self, group_id: int, name: str) -> int | None:
-        try:
-            result = await self.bot.create_forum_topic(
-                chat_id = group_id,
-                name    = name[:128],
-            )
-            return result.message_thread_id
-        except Exception as e:
-            log.error("create_forum_topic error: %s", e)
-            return None
+        for attempt in range(5):
+            try:
+                result = await self.bot.create_forum_topic(
+                    chat_id = group_id,
+                    name    = name[:128],
+                )
+                return result.message_thread_id
+            except TelegramRetryAfter as e:
+                wait = e.retry_after + 1
+                log.warning("create_forum_topic flood, waiting %ds (attempt %d)",
+                            wait, attempt + 1)
+                await asyncio.sleep(wait)
+            except Exception as e:
+                log.error("create_forum_topic error: %s", e)
+                return None
+        log.error("create_forum_topic: too many retries for '%s'", name)
+        return None
 
     async def _notify(self, group_id: int, text: str):
-        try:
-            await self.bot.send_message(chat_id=group_id, text=text)
-        except Exception as e:
-            log.error("notify error: %s", e)
+        for attempt in range(3):
+            try:
+                await self.bot.send_message(chat_id=group_id, text=text)
+                return
+            except TelegramRetryAfter as e:
+                wait = e.retry_after + 1
+                log.warning("notify flood, waiting %ds", wait)
+                await asyncio.sleep(wait)
+            except Exception as e:
+                log.error("notify error: %s", e)
+                return
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

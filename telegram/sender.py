@@ -65,17 +65,26 @@ async def send_to_telegram_topic(
     topic_id: int,
     text:     str,
 ) -> Optional[TgMessage]:
-    """Отправляет текст в конкретную тему супергруппы."""
-    try:
-        return await bot.send_message(
-            chat_id              = group_id,
-            message_thread_id    = topic_id,
-            text                 = text[:4096],
-            parse_mode           = "HTML",
-        )
-    except Exception as e:
-        log.error("send_to_telegram_topic error: %s", e)
-        return None
+    """Отправляет текст в тему супергруппы с retry при flood control."""
+    from aiogram.exceptions import TelegramRetryAfter
+    import asyncio as _asyncio
+    for attempt in range(5):
+        try:
+            return await bot.send_message(
+                chat_id           = group_id,
+                message_thread_id = topic_id,
+                text              = text[:4096],
+                parse_mode        = "HTML",
+            )
+        except TelegramRetryAfter as e:
+            wait = e.retry_after + 1
+            log.warning("send_to_telegram_topic flood, waiting %ds (attempt %d)",
+                        wait, attempt + 1)
+            await _asyncio.sleep(wait)
+        except Exception as e:
+            log.error("send_to_telegram_topic error: %s", e)
+            return None
+    return None
 
 
 async def send_to_telegram(
