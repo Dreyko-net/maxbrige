@@ -2,10 +2,10 @@
 SyncWorker — загрузка истории чатов MAX в темы Telegram.
 
 Алгоритм:
-1. Получить список чатов MAX
-2. Для каждого чата создать тему в супергруппе (если нет)
+1. Получить все чаты через fetch_chats()
+2. Создать тему в супергруппе для каждого чата
 3. Загрузить сообщения за сегодня → отправить в тему
-4. Фоново загрузить остальные сообщения за N дней
+4. Фоново загрузить остальные за N дней
 """
 
 from __future__ import annotations
@@ -26,14 +26,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Начало сегодняшнего дня в Unix ms
+
 def _today_start_ms() -> int:
     d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     return int(d.timestamp() * 1000)
 
 def _days_ago_ms(days: int) -> int:
-    d = datetime.now() - timedelta(days=days)
-    return int(d.timestamp() * 1000)
+    return int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -45,10 +44,6 @@ class SyncWorker:
         self.manager = manager
 
     async def full_sync(self, user: User, client: "MaxUserClient"):
-        """
-        Полная синхронизация при первом подключении пользователя.
-        Вызывается из auth handler после создания супергруппы.
-        """
         tg_group_id = user.tg_group_id
         if not tg_group_id:
             log.error("No tg_group_id for user %s", user.tg_user_id)
@@ -56,22 +51,19 @@ class SyncWorker:
 
         await self._notify(tg_group_id, "📋 Получаю список чатов MAX…")
 
-        # 1. Получить все чаты
+        # 1. Получаем чаты
         chats = await client.get_chats()
         if not chats:
-            await self._notify(tg_group_id, "⚠️ Чаты не найдены.")
+            await self._notify(tg_group_id, "⚠️ Чаты не найдены или список пуст.")
             return
 
-        await self._notify(tg_group_id,
-                           f"✅ Найдено чатов: {len(chats)}\n"
-                           f"🗂 Создаю темы…")
+        await self._notify(tg_group_id, f"✅ Найдено чатов: {len(chats)}\n🗂 Создаю темы…")
 
-        # 2. Создать темы для всех чатов
+        # 2. Создаём темы
         db_chats: list[Chat] = []
         for max_chat in chats:
-            chat_id    = str(getattr(max_chat, "id",    "") or "")
-            chat_title = str(getattr(max_chat, "title", "") or
-                             getattr(max_chat, "name",  "") or "Без названия")
+            chat_id    = _chat_id(max_chat)
+            chat_title = _chat_title(max_chat)
             if not chat_id:
                 continue
 
@@ -82,22 +74,18 @@ class SyncWorker:
                 if topic_id:
                     await db.set_topic_id(db_chat.id, topic_id)
                     db_chat.tg_topic_id = topic_id
-                await asyncio.sleep(0.5)  # не спамим Telegram API
+                await asyncio.sleep(0.5)
 
             db_chats.append(db_chat)
 
         await self._notify(tg_group_id,
-                           f"✅ Темы созданы.\n"
-                           f"📥 Загружаю сообщения за сегодня…")
+                           f"✅ Темы созданы.\n📥 Загружаю сообщения за сегодня…")
 
-        # 3. Сначала — сообщения за сегодня
+        # 3. Сначала — сегодня
         today_start = _today_start_ms()
         now         = _now_ms()
         for db_chat in db_chats:
-            await self._sync_chat(
-                user, client, db_chat,
-                from_ts=today_start, to_ts=now,
-            )
+            await self._sync_chat(user, client, db_chat, from_ts=today_start, to_ts=now)
 
         await self._notify(tg_group_id,
                            f"✅ Сообщения за сегодня загружены.\n"
@@ -108,38 +96,19 @@ class SyncWorker:
             self._sync_history_background(user, client, db_chats, today_start)
         )
 
-    async def _sync_history_background(
-        self,
-        user: User,
-        client: "MaxUserClient",
-        db_chats: list[Chat],
-        before_ts: int,
-    ):
-        """Загружает историю старше today_start в фоновом режиме."""
+    async def _sync_history_background(self, user, client, db_chats, before_ts):
         from_ts = _days_ago_ms(HISTORY_DAYS)
         try:
             for db_chat in db_chats:
-                await self._sync_chat(
-                    user, client, db_chat,
-                    from_ts=from_ts, to_ts=before_ts,
-                )
+                await self._sync_chat(user, client, db_chat,
+                                      from_ts=from_ts, to_ts=before_ts)
                 await asyncio.sleep(1)
-
-            await self._notify(
-                user.tg_group_id,
-                f"✅ История за {HISTORY_DAYS} дней загружена полностью.",
-            )
+            await self._notify(user.tg_group_id,
+                               f"✅ История за {HISTORY_DAYS} дней загружена.")
         except Exception as e:
             log.error("Background sync error for user %s: %s", user.tg_user_id, e)
 
-    async def _sync_chat(
-        self,
-        user: User,
-        client: "MaxUserClient",
-        db_chat: Chat,
-        from_ts: int,
-        to_ts: int,
-    ):
+    async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
         if not db_chat.tg_topic_id:
             return
 
@@ -147,7 +116,7 @@ class SyncWorker:
             max_chat_id = db_chat.max_chat_id,
             from_ts     = from_ts,
             to_ts       = to_ts,
-            limit       = 200,
+            limit       = 100,
         )
         if not messages:
             return
@@ -164,25 +133,22 @@ class SyncWorker:
 
         await db.set_chat_synced(db_chat.id)
 
-    async def _forward_msg_to_tg(
-        self,
-        user: User,
-        client: "MaxUserClient",
-        db_chat: Chat,
-        msg,
-    ):
+    async def _forward_msg_to_tg(self, user, client, db_chat: Chat, msg):
         from telegram.sender import format_history_message, send_to_telegram_topic
-        from bridge.queue import BridgeEvent
         from bridge.max_client import _detect_media
 
-        text      = getattr(msg, "text",      "") or ""
-        msg_id    = str(getattr(msg, "id",    "") or "")
-        timestamp = getattr(msg, "timestamp", _now_ms())
-        sender    = getattr(msg, "sender",    None)
+        text        = getattr(msg, "text",      "") or ""
+        msg_id      = str(getattr(msg, "id",    "") or "")
+        timestamp   = getattr(msg, "timestamp", _now_ms())
+        sender      = getattr(msg, "sender",    None)
         sender_name = ""
         if sender:
-            sender_name = (getattr(sender, "name", "") or
-                           getattr(sender, "username", "") or "")
+            names = getattr(sender, "names", None)
+            if names:
+                sender_name = getattr(names[0], "name", "") if names else ""
+            if not sender_name:
+                sender_name = (getattr(sender, "name", "") or
+                               getattr(sender, "username", "") or "")
 
         has_media, media_type = _detect_media(msg)
 
@@ -195,10 +161,10 @@ class SyncWorker:
         )
 
         sent_msg = await send_to_telegram_topic(
-            bot         = self.bot,
-            group_id    = user.tg_group_id,
-            topic_id    = db_chat.tg_topic_id,
-            text        = formatted,
+            bot      = self.bot,
+            group_id = user.tg_group_id,
+            topic_id = db_chat.tg_topic_id,
+            text     = formatted,
         )
 
         if sent_msg:
@@ -211,22 +177,22 @@ class SyncWorker:
                 tg_msg_id  = sent_msg.message_id,
                 has_media  = has_media,
             )
-            # Кнопка "📎 Загрузить" для медиа
             if has_media and msg_db_id:
                 from telegram.keyboards import media_download_kb
-                await self.bot.edit_message_reply_markup(
-                    chat_id      = user.tg_group_id,
-                    message_id   = sent_msg.message_id,
-                    reply_markup = media_download_kb(msg_db_id, msg_id),
-                )
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
+                try:
+                    await self.bot.edit_message_reply_markup(
+                        chat_id      = user.tg_group_id,
+                        message_id   = sent_msg.message_id,
+                        reply_markup = media_download_kb(msg_db_id, msg_id),
+                    )
+                except Exception:
+                    pass
 
     async def _create_topic(self, group_id: int, name: str) -> int | None:
         try:
             result = await self.bot.create_forum_topic(
-                chat_id    = group_id,
-                name       = name[:128],  # Telegram limit
+                chat_id = group_id,
+                name    = name[:128],
             )
             return result.message_thread_id
         except Exception as e:
@@ -234,8 +200,36 @@ class SyncWorker:
             return None
 
     async def _notify(self, group_id: int, text: str):
-        """Отправляет сообщение в General тему супергруппы."""
         try:
             await self.bot.send_message(chat_id=group_id, text=text)
         except Exception as e:
             log.error("notify error: %s", e)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _chat_id(chat) -> str:
+    """Извлекает ID чата из объекта pymax Chat."""
+    for attr in ("id", "chat_id", "peer_id"):
+        val = getattr(chat, attr, None)
+        if val is not None:
+            return str(val)
+    return ""
+
+
+def _chat_title(chat) -> str:
+    """Извлекает название чата."""
+    # Групповые чаты
+    for attr in ("title", "name"):
+        val = getattr(chat, attr, None)
+        if val:
+            return str(val)
+    # Личные диалоги — берём имя из участника
+    participants = getattr(chat, "participants", None) or []
+    if participants:
+        p = participants[0]
+        names = getattr(p, "names", None)
+        if names:
+            return getattr(names[0], "name", "") or str(getattr(p, "id", ""))
+        return str(getattr(p, "name", "") or getattr(p, "id", "Диалог"))
+    return "Без названия"
