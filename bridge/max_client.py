@@ -167,18 +167,25 @@ class MaxUserClient:
         limit:       int = 100,
     ) -> list:
         """
-        Возвращает историю сообщений чата за период [from_ts, to_ts].
-        fetch_history(chat_id, backward, from_time, forward_time)
-        from_time и forward_time — Unix timestamp в миллисекундах.
+        Возвращает историю сообщений чата.
+        fetch_history(chat_id, from_time=<конец периода>, backward=<кол-во>)
+        from_time — точка отсчёта, берём сообщения ДО неё.
+        Фильтрация по from_ts выполняется на нашей стороне.
         """
         try:
             result = await self._client.fetch_history(
-                chat_id      = int(max_chat_id),
-                backward     = limit,
-                from_time    = to_ts,       # точка отсчёта (конец периода)
-                backward_time = from_ts,    # нижняя граница
+                chat_id   = int(max_chat_id),
+                from_time = to_ts,   # точка отсчёта — конец периода
+                backward  = limit,   # сколько сообщений назад
             )
-            return result or []
+            if not result:
+                return []
+            # Фильтруем по нижней границе from_ts
+            filtered = [m for m in result
+                        if getattr(m, "timestamp", 0) >= from_ts]
+            log.info("[user=%s] get_history chat=%s: got %d, filtered to %d",
+                     self.tg_user_id, max_chat_id, len(result), len(filtered))
+            return filtered
         except Exception as e:
             log.error("[user=%s] get_history(%s) error: %s",
                       self.tg_user_id, max_chat_id, e)

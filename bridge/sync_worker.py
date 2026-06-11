@@ -219,17 +219,40 @@ def _chat_id(chat) -> str:
 
 def _chat_title(chat) -> str:
     """Извлекает название чата."""
-    # Групповые чаты
+    # Групповые чаты — title или name
     for attr in ("title", "name"):
         val = getattr(chat, attr, None)
         if val:
             return str(val)
-    # Личные диалоги — берём имя из участника
-    participants = getattr(chat, "participants", None) or []
+
+    # Личные диалоги — participants может быть dict {id: User} или list
+    participants = getattr(chat, "participants", None)
     if participants:
-        p = participants[0]
-        names = getattr(p, "names", None)
-        if names:
-            return getattr(names[0], "name", "") or str(getattr(p, "id", ""))
-        return str(getattr(p, "name", "") or getattr(p, "id", "Диалог"))
-    return "Без названия"
+        try:
+            # dict: {user_id: User, ...}
+            if isinstance(participants, dict):
+                items = list(participants.values())
+            else:
+                items = list(participants)
+
+            for p in items:
+                # Пропускаем себя если есть me_id
+                names = getattr(p, "names", None)
+                if names:
+                    try:
+                        first = names[0] if isinstance(names, list) else next(iter(names.values()))
+                        name = getattr(first, "name", "") or getattr(first, "first_name", "")
+                        if name:
+                            return str(name)
+                    except (IndexError, StopIteration, KeyError):
+                        pass
+                for attr in ("name", "first_name", "username"):
+                    val = getattr(p, attr, None)
+                    if val:
+                        return str(val)
+        except Exception:
+            pass
+
+    # Последний вариант — ID чата
+    cid = getattr(chat, "id", None) or getattr(chat, "chat_id", "")
+    return f"Диалог {cid}" if cid else "Без названия"

@@ -261,8 +261,8 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
         log.info("[group] user not found or not active, skipping")
         return
 
-    if user.tg_group_id:
-        log.info("[group] user already has group, skipping")
+    if user.tg_group_id and user.tg_group_id != group_id:
+        log.info("[group] user already has different group, skipping")
         return
 
     # Проверяем Topics
@@ -294,11 +294,12 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     )
 
     client = manager.get_client(tg_user_id)
+    log.info("[group] client_in_pool=%s for user=%s", client is not None, tg_user_id)
     if client:
         sync = SyncWorker(bot=bot, manager=manager)
         asyncio.create_task(sync.full_sync(user=user, client=client))
     else:
-        await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Попробуйте /start")
+        await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Напишите /sync после перезапуска бота.")
 
 
 @router.my_chat_member(
