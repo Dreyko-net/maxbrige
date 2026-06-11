@@ -11,6 +11,7 @@ from typing import Optional, TYPE_CHECKING
 
 from database import db, User
 from bridge.max_client import MaxUserClient, session_path_for
+from config import SESSIONS_DIR
 from bridge.queue import BridgeEvent, max_to_tg_queue, tg_to_max_queue
 from bridge.sync_worker import SyncWorker
 
@@ -99,6 +100,11 @@ class BridgeManager:
             await client.start()
             self._clients[user.tg_user_id] = client
             log.info("Session restored for user %s", user.tg_user_id)
+        except TimeoutError:
+            # Сессия невалидна — сбрасываем и уведомляем пользователя
+            log.error("Session restore timeout for user %s — session likely revoked",
+                      user.tg_user_id)
+            await self._on_session_revoked(user.tg_user_id)
         except Exception as e:
             log.error("Failed to restore session for user %s: %s",
                       user.tg_user_id, e, exc_info=True)
@@ -107,32 +113,46 @@ class BridgeManager:
         return self._clients.get(tg_user_id)
 
     async def _on_session_revoked(self, tg_user_id: int):
-        """Сессия MAX сброшена сервером — удаляем клиент и уведомляем пользователя."""
-        log.warning("[user=%s] session revoked, removing from pool", tg_user_id)
-        self._clients.pop(tg_user_id, None)
+        """Сессия MAX сброшена — чистим всё и просим повторную авторизацию."""
+        log.warning("[user=%s] session revoked, cleaning up", tg_user_id)
 
-        # Сбрасываем статус в БД чтобы потребовалась повторная авторизация
+        # Останавливаем и удаляем клиент из пула
+        client = self._clients.pop(tg_user_id, None)
+        if client:
+            await client.stop()
+
+        # Удаляем файл сессии pymax чтобы не пытался войти по старому токену
+        import os, glob
+        session_pattern = str(SESSIONS_DIR / f"user_{tg_user_id}" / "session.db")
+        for f in glob.glob(session_pattern):
+            try:
+                os.remove(f)
+                log.info("[user=%s] removed session file: %s", tg_user_id, f)
+            except Exception as e:
+                log.error("[user=%s] failed to remove session file: %s", tg_user_id, e)
+
+        # Сбрасываем статус в БД — пользователь должен пройти авторизацию заново
         import aiosqlite
         from config import DB_PATH
         async with aiosqlite.connect(DB_PATH) as conn:
             await conn.execute(
-                "UPDATE users SET status='pending' WHERE tg_user_id=?", (tg_user_id,)
+                "UPDATE users SET status='pending' WHERE tg_user_id=?",
+                (tg_user_id,)
             )
             await conn.commit()
+        log.info("[user=%s] user status reset to pending", tg_user_id)
 
-        # Уведомляем пользователя через Telegram
+        # Уведомляем пользователя
         if self._bot:
             try:
-                text = (
-                    "<b>Сессия MAX сброшена сервером.</b> "
-                    "Для продолжения работы пройдите авторизацию заново: /start"
+                msg = (
+                    "<b>Сессия MAX сброшена.</b> "
+                    "MAX разлогинил аккаунт. "
+                    "Пройдите авторизацию заново: /start"
                 )
-                await self._bot.send_message(
-                    tg_user_id, text, parse_mode="HTML",
-                )
+                await self._bot.send_message(tg_user_id, msg, parse_mode="HTML")
             except Exception as e:
-                log.error("Failed to notify user %s about session revoke: %s",
-                          tg_user_id, e)
+                log.error("[user=%s] notify failed: %s", tg_user_id, e)
 
     # ── Воркер MAX → Telegram ─────────────────────────────────────────────────
 
