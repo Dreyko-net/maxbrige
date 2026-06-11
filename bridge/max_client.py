@@ -37,6 +37,7 @@ class MaxUserClient:
         self._task:   Optional[asyncio.Task] = None
         self.me            = None
         self._ready        = asyncio.Event()
+        self._on_session_revoked = None  # callback(tg_user_id)
 
     def _build_client(self) -> Client:
         Path(self.session_path).mkdir(parents=True, exist_ok=True)
@@ -84,7 +85,14 @@ class MaxUserClient:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            log.error("[user=%s] MAX client error: %s", self.tg_user_id, e, exc_info=True)
+            err_str = str(e).lower()
+            # Сессия сброшена сервером — нужна повторная авторизация
+            if "fail_logout_all" in err_str or "login.token" in err_str or "авторизируйтесь" in err_str:
+                log.error("[user=%s] MAX session revoked, need reauth", self.tg_user_id)
+                if self._on_session_revoked:
+                    await self._on_session_revoked(self.tg_user_id)
+            else:
+                log.error("[user=%s] MAX client error: %s", self.tg_user_id, e, exc_info=True)
 
     async def stop(self) -> None:
         if self._task:
@@ -178,7 +186,6 @@ class MaxUserClient:
                 from_time = to_ts,   # точка отсчёта — конец периода
                 backward  = limit,   # сколько сообщений назад
             )
-            log.info("[DEBUG user=%s] get_history chat=%s: result_messangers: %d", self.tg_user_id, max_chat_id, result)
             if not result:
                 return []
             # Фильтруем по нижней границе from_ts

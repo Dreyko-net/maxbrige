@@ -70,6 +70,7 @@ class BridgeManager:
             sms_code_provider = sms_code_provider,
         )
 
+        client._on_session_revoked = self._on_session_revoked
         log.info("[user=%s] calling client.start()", tg_user_id)
         await client.start()
         log.info("[user=%s] client.start() done, me=%s", tg_user_id, client.me)
@@ -94,6 +95,7 @@ class BridgeManager:
                 max_phone    = user.max_phone,
                 session_path = user.session_path,
             )
+            client._on_session_revoked = self._on_session_revoked
             await client.start()
             self._clients[user.tg_user_id] = client
             log.info("Session restored for user %s", user.tg_user_id)
@@ -103,6 +105,34 @@ class BridgeManager:
 
     def get_client(self, tg_user_id: int) -> Optional[MaxUserClient]:
         return self._clients.get(tg_user_id)
+
+    async def _on_session_revoked(self, tg_user_id: int):
+        """Сессия MAX сброшена сервером — удаляем клиент и уведомляем пользователя."""
+        log.warning("[user=%s] session revoked, removing from pool", tg_user_id)
+        self._clients.pop(tg_user_id, None)
+
+        # Сбрасываем статус в БД чтобы потребовалась повторная авторизация
+        import aiosqlite
+        from config import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.execute(
+                "UPDATE users SET status='pending' WHERE tg_user_id=?", (tg_user_id,)
+            )
+            await conn.commit()
+
+        # Уведомляем пользователя через Telegram
+        if self._bot:
+            try:
+                text = (
+                    "<b>Сессия MAX сброшена сервером.</b> "
+                    "Для продолжения работы пройдите авторизацию заново: /start"
+                )
+                await self._bot.send_message(
+                    tg_user_id, text, parse_mode="HTML",
+                )
+            except Exception as e:
+                log.error("Failed to notify user %s about session revoke: %s",
+                          tg_user_id, e)
 
     # ── Воркер MAX → Telegram ─────────────────────────────────────────────────
 
