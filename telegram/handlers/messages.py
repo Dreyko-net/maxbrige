@@ -181,13 +181,3 @@ def _extract_media(msg: Message) -> tuple[str, str, str]:
     if msg.audio:
         return "audio", msg.audio.file_id, msg.audio.file_name or "audio.mp3"
     return "file", "", "file"
-
-from telegram.handlers.auth import AuthStates
-
-@router.message(AuthStates.WAIT_GROUP)
-async def debug_wait_group(msg: Message):
-    log.info("[DEBUG] WAIT_GROUP got message: content_type=%s forward_origin =%s forward_origin=%s",
-             msg.content_type,
-             msg.forward_origin ,
-             getattr(msg, 'forward_origin', None))
-    await msg.answer(f"DEBUG: content_type={msg.content_type}, forward_origin ={msg.forward_origin }")
