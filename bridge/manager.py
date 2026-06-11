@@ -100,11 +100,10 @@ class BridgeManager:
             await client.start()
             self._clients[user.tg_user_id] = client
             log.info("Session restored for user %s", user.tg_user_id)
-        except TimeoutError:
-            # Сессия невалидна — сбрасываем и уведомляем пользователя
-            log.error("Session restore timeout for user %s — session likely revoked",
+        except (TimeoutError, asyncio.TimeoutError):
+            log.error("Session restore timeout for user %s — session revoked",
                       user.tg_user_id)
-            await self._on_session_revoked(user.tg_user_id)
+            asyncio.create_task(self._on_session_revoked(user.tg_user_id))
         except Exception as e:
             log.error("Failed to restore session for user %s: %s",
                       user.tg_user_id, e, exc_info=True)
