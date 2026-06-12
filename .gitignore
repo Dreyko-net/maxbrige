@@ -3,3 +3,8 @@
 .env.*
 !.env.example  # НО исключить .env.example (если нужен шаблон)
 !.env.sample   # Исключить файлы-примеры
+bridge.*
+__pycache__/
+database/
+load_env.bat
+sessions/

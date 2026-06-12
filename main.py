@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 # Отключаем лишние логи pymax
 logging.getLogger("pymax").setLevel(logging.WARNING)
 logging.getLogger("aiogram").setLevel(logging.INFO)
+logging.getLogger("aiogram.dispatcher").setLevel(logging.CRITICAL)
 
 
 async def main():

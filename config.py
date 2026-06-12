@@ -12,6 +12,7 @@ load_dotenv()
 # ── Telegram ──────────────────────────────────────────────────────────────────
 # Токен Telegram-бота (от @BotFather)
 TG_BOT_TOKEN: str = os.getenv("TG_BOT_TOKEN", "")
+TG_PROXY: str = os.getenv("TG_PROXY", "")
 
 # ── Пути ─────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).parent
