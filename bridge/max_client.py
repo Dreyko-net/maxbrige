@@ -62,16 +62,9 @@ class MaxUserClient:
         # _app.start() завершается после успешного логина.
         # Таймаут большой (5 мин) — пользователь может долго вводить SMS.
         log.info("[user=%s] running _app.start() (auth + login)", self.tg_user_id)
-        try:
-            await asyncio.wait_for(
-                self._client._app.start(),
-                timeout=60,  # чуть больше таймаута SMS-провайдера (300 сек)
-            )
-        except asyncio.TimeoutError:
-            log.error("[user=%s] _app.start() timeout", self.tg_user_id)
-            raise TimeoutError("MAX auth timeout")
-        except asyncio.CancelledError:
-            raise
+        # Без внешнего таймаута — таймаут уже есть в SMS-провайдере (300 сек).
+        # wait_for нельзя использовать: он отменяет корутину пока SMS-провайдер ждёт ввода.
+        await self._client._app.start()
 
         # Авторизация успешна
         self.me = getattr(self._client, "me", None)
