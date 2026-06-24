@@ -60,6 +60,7 @@ class BridgeManager:
         tg_user_id: int,
         max_phone: str,
         sms_code_provider,
+        password_provider,
     ) -> MaxUserClient:
         path = session_path_for(tg_user_id)
         log.info("[user=%s] connect_user started, path=%s", tg_user_id, path)
@@ -69,6 +70,7 @@ class BridgeManager:
             max_phone         = max_phone,
             session_path      = path,
             sms_code_provider = sms_code_provider,
+            password_provider = password_provider,
         )
 
         client._on_session_revoked = self._on_session_revoked

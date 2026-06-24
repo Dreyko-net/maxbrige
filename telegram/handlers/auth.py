@@ -165,7 +165,7 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
     await state.set_state(AuthStates.WAIT_SMS)
 
     task = asyncio.create_task(
-        _run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider,
+        _run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider, provider_2fa=provider_2fa,
                   bot=bot, chat_id=msg.chat.id, state=state)
     )
     _auth_tasks[tg_user_id] = task
@@ -195,8 +195,8 @@ async def handle_sms_code(msg: Message, state: FSMContext):
 # ── 2FA-код ───────────────────────────────────────────────────────────────────
 
 @router.message(AuthStates.WAIT_2FA)
-async def handle_2FA_password(msg: Message, state: FSMContext):
-    password = msg.text.strip() if msg.text else ""
+async def handle_2FA_code(msg: Message, state: FSMContext):
+    code = msg.text.strip() if msg.text else ""
     
     tg_user_id = msg.from_user.id
     log.info("[auth] 2fa code entered user=%s", tg_user_id)
@@ -206,7 +206,7 @@ async def handle_2FA_password(msg: Message, state: FSMContext):
         await state.clear()
         return
 
-    provider_2fa.set_password(password)
+    provider_2fa.set_password(code)
     await msg.answer("🔐 Проверяю 2FA код…")    
 
 
@@ -345,11 +345,11 @@ async def bot_added_as_member(event: ChatMemberUpdated, bot: Bot):
 
 # ── Фоновые функции ───────────────────────────────────────────────────────────
 
-async def _run_auth(tg_user_id, phone, provider, bot, chat_id, state):
+async def _run_auth(tg_user_id, phone, provider, provider_2fa, bot, chat_id, state):
     log.info("[auth] _run_auth started user=%s", tg_user_id)
     try:
         client = await manager.connect_user(
-            tg_user_id=tg_user_id, max_phone=phone, sms_code_provider=provider)
+            tg_user_id=tg_user_id, max_phone=phone, sms_code_provider=provider, password_provider = provider_2fa)
         log.info("[auth] connect_user done user=%s me=%s", tg_user_id, client.me)
 
         _pending_auth.pop(tg_user_id, None)

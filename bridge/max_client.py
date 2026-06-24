@@ -26,12 +26,14 @@ class MaxUserClient:
         session_path:      str,
         on_ready:          Optional[Callable] = None,
         sms_code_provider = None,
+        password_provider = None,
     ):
         self.tg_user_id          = tg_user_id
         self.max_phone           = max_phone
         self.session_path        = session_path
         self.on_ready            = on_ready
         self._sms_provider       = sms_code_provider
+        self._password_provider       = password_provider
         self._client: Optional[Client] = None
         self._task:   Optional[asyncio.Task] = None
         self.me                  = None
@@ -45,6 +47,7 @@ class MaxUserClient:
             work_dir          = self.session_path,
             session_name      = "session.db",
             sms_code_provider = self._sms_provider,
+            password_provider = self._password_provider
         )
 
     async def start(self) -> None:
