@@ -22,6 +22,7 @@ from bridge.manager import manager
 from bridge.max_client import session_path_for
 from database import db
 from telegram.sms_provider import TelegramSmsCodeProvider
+from telegram.password_provider import TelegramPasswordProvider
 from bridge.sync_worker import SyncWorker
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ router = Router()
 
 # tg_user_id → TelegramSmsCodeProvider
 _pending_auth: dict[int, TelegramSmsCodeProvider] = {}
+_pending_2fa_auth: dict[int, TelegramPasswordProvider] = {}
 
 # tg_user_id → asyncio.Task авторизации (чтобы можно было отменить)
 _auth_tasks: dict[int, asyncio.Task] = {}
@@ -37,6 +39,7 @@ _auth_tasks: dict[int, asyncio.Task] = {}
 class AuthStates(StatesGroup):
     WAIT_PHONE = State()
     WAIT_SMS   = State()
+    WAIT_2FA   = State()
     WAIT_GROUP = State()
     CONNECTED  = State()
 
@@ -146,7 +149,8 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
 
     provider = TelegramSmsCodeProvider(tg_user_id=tg_user_id, bot=bot, chat_id=msg.chat.id)
     _pending_auth[tg_user_id] = provider
-
+    provider_2fa = TelegramPasswordProvider(tg_user_id=tg_user_id, bot=bot, chat_id=msg.chat.id)
+    _pending_2fa_auth[tg_user_id] = provider_2fa
     await msg.answer(
         f"📲 Подключаюсь к MAX с номером <code>{phone}</code>…",
         parse_mode="HTML",
@@ -186,6 +190,24 @@ async def handle_sms_code(msg: Message, state: FSMContext):
 
     provider.set_code(code)
     await msg.answer("🔐 Проверяю код…")
+    await state.set_state(AuthStates.WAIT_2FA)
+    
+# ── 2FA-код ───────────────────────────────────────────────────────────────────
+
+@router.message(AuthStates.WAIT_2FA)
+async def handle_2FA_password(msg: Message, state: FSMContext):
+    password = msg.text.strip() if msg.text else ""
+    
+    tg_user_id = msg.from_user.id
+    log.info("[auth] 2fa code entered user=%s", tg_user_id)
+    provider_2fa = _pending_2fa_auth.get(tg_user_id)
+    if not provider_2fa:
+        await msg.answer("⚠️ Сессия устарела. Начните заново: /start")
+        await state.clear()
+        return
+
+    provider_2fa.set_password(password)
+    await msg.answer("🔐 Проверяю 2FA код…")    
 
 
 # ── Отмена авторизации ────────────────────────────────────────────────────────
