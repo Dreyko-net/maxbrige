@@ -59,6 +59,9 @@ def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     )
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url),
+    ],
+    [
+        InlineKeyboardButton(text="Бот уже добавлен в группу", callback_data="bot_added_group"),
     ]])
 
 
@@ -265,12 +268,13 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
 # Это событие приходит когда бота добавляют в группу или назначают админом.
 # Именно здесь мы узнаём ID группы — без пересылки сообщений.
 
-@router.my_chat_member(
-    ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> ADMINISTRATOR)
-)
+# @router.my_chat_member(
+#     ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> ADMINISTRATOR)
+# )
+@router.callback_query(F.data == "bot_added_group")
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     """Бот добавлен в группу с правами администратора."""
-    group = event.chat
+    group = event.message.chat
     if group.type not in ("supergroup", "group"):
         return
 
@@ -446,11 +450,25 @@ async def cmd_debug_chats(msg: Message):
             await msg.answer("⚠️ fetch_chats() вернул пустой список")
             return
         lines = [f"Всего чатов: {len(raw)}"]
-        for c in raw[:5]:
+        for c in raw[:10]:
             cid    = getattr(c, "id",    None) or getattr(c, "chat_id", "?")
-            ctitle = getattr(c, "title", None) or getattr(c, "name",    "?")
-            ctype  = type(c).__name__
-            lines.append(f"• [{ctype}] id={cid} title={ctitle}")
+            ctitle = getattr(c, "title", None) or getattr(c, "owner",    "?")
+            cicon = getattr(c, "base_icon_url", None) or getattr(c, "base_raw_icon_url",    "?")
+            ctype  = getattr(c, "type", "?")
+            if getattr(c, 'has_bots', False):
+                if (getattr(c, 'options', None) or {}).get('SERVICE_CHAT', False):
+                    ctitle = 'MAX service Chat'
+                else:
+                    ctitle = f"MAX Bot: {next(user_id for user_id in getattr(c, 'participants',    '?') if user_id != getattr(c, 'owner',    '?'))}" 
+            if ctype == 'DIALOG' and not getattr(c, 'has_bots', False) and getattr(c, "id",    None) == 0:
+                ctitle = 'MAX Избранное'
+            if ctype == 'DIALOG' and not getattr(c, 'has_bots', False) and getattr(c, "id",    None) != 0:
+                    participant_id = next(user_id for user_id in getattr(c, "participants",    "?") if user_id != getattr(c, "owner",    "?"))
+                    user = await client._client.fetch_users([participant_id])
+                    if user:
+                        ctitle = f"{getattr(user[0].names[0], 'first_name', '')} {getattr(user[0].names[0], 'last_name', '')}"
+            #ctype  = type(c).__name__
+            lines.append(f"• [{ctype}] id={cid} title={ctitle} icon={cicon}")
         await msg.answer("\n".join(lines))
     except Exception as e:
         await msg.answer(f"❌ Ошибка: <code>{e}</code>", parse_mode="HTML")

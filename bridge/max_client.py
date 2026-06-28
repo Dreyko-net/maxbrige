@@ -104,6 +104,7 @@ class MaxUserClient:
                 self._client._reset_runtime()
                 await self._client._app.start()
                 log.info("[user=%s] reconnected", self.tg_user_id)
+                await asyncio.sleep(5)
             except asyncio.CancelledError:
                 return
             except Exception as e:

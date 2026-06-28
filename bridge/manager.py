@@ -179,6 +179,8 @@ class BridgeManager:
         if not chat or not chat.tg_topic_id:
             log.warning("No topic for max_chat_id=%s user=%s",
                         event.max_chat_id, event.tg_user_id)
+            log.warning("No topic for event=%s user=%s",
+                        event, event.tg_user_id)
             return
 
         await send_to_telegram(

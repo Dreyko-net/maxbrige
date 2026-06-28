@@ -235,39 +235,45 @@ def _chat_id(chat) -> str:
 
 def _chat_title(chat) -> str:
     """Извлекает название чата."""
+    #Находим сервисные чаты и ботов
+    if getattr(chat, 'has_bots', False):
+        if (getattr(chat, 'options', None) or {}).get('SERVICE_CHAT', False):
+            ctitle = 'MAX service Chat'
+        else:
+            ctitle = f"MAX Bot: {next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))}" 
+    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) == 0:
+        ctitle = 'MAX Избранное'
+
+    
     # Групповые чаты — title или name
     for attr in ("title", "name"):
         val = getattr(chat, attr, None)
         if val:
             return str(val)
 
-    # Личные диалоги — participants может быть dict {id: User} или list
-    participants = getattr(chat, "participants", None)
-    if participants:
-        try:
-            # dict: {user_id: User, ...}
-            if isinstance(participants, dict):
-                items = list(participants.values())
-            else:
-                items = list(participants)
+    # Личные диалоги — participants  
+    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) != 0:
+        participants = getattr(chat, "participants", None)
+        if participants:
+            try:
+                items = next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))
 
-            for p in items:
-                # Пропускаем себя если есть me_id
-                names = getattr(p, "names", None)
-                if names:
-                    try:
-                        first = names[0] if isinstance(names, list) else next(iter(names.values()))
-                        name = getattr(first, "name", "") or getattr(first, "first_name", "")
-                        if name:
-                            return str(name)
-                    except (IndexError, StopIteration, KeyError):
-                        pass
-                for attr in ("name", "first_name", "username"):
-                    val = getattr(p, attr, None)
-                    if val:
-                        return str(val)
-        except Exception:
-            pass
+                for p in items:
+                    # Пропускаем себя если есть me_id
+                    names = getattr(p, "names", None)
+                    if names:
+                        try:
+                            name = f"{getattr(names[0], 'first_name', '')} {getattr(names[0], 'last_name', '')}"
+                            if name:
+                                return str(name)
+                        except (IndexError, StopIteration, KeyError):
+                            pass
+                    for attr in ("name", "first_name", "username"):
+                        val = getattr(p, attr, None)
+                        if val:
+                            return str(val)
+            except Exception:
+                pass
 
     # Последний вариант — ID чата
     cid = getattr(chat, "id", None) or getattr(chat, "chat_id", "")
