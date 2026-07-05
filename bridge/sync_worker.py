@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter,TelegramBadRequest
 from database import db, User, Chat
 from config import HISTORY_DAYS, FLOOD_SLEEP, CONTROL_TOPIC_NAME
 
@@ -64,11 +64,21 @@ class SyncWorker:
         db_chats: list[Chat] = []
         for max_chat in chats:
             chat_id    = _chat_id(max_chat)
-            chat_title = _chat_title(max_chat)
+            chat_title = await _chat_title(max_chat, client)
             if not chat_id:
                 continue
 
             db_chat = await db.upsert_chat(user.id, chat_id, chat_title)
+            #Проверка существует ли топик/тема. Если нет то создать снова.
+            if db_chat.tg_topic_id:
+                test_topic = await self._test_topic(tg_group_id, db_chat.tg_topic_id, chat_title)
+                #Если False то значить не существует, None скорее всего сетевая ошибка
+                if test_topic == None:
+                    log.warning("test_exist_forum_topic Проверка топика выдала ошибку. chat_title: %s, user.id: %s,db_chat.tg_topic_id: %s", chat_title, user.id, db_chat.tg_topic_id)
+                    test_topic = True
+            if not test_topic:
+                db_delete = await db.delete_topic_id(user.id, chat_id, db_chat.tg_topic_id)
+                db_chat = await db.upsert_chat(user.id, chat_id, chat_title)
 
             if not db_chat.tg_topic_id:
                 topic_id = await self._create_topic(tg_group_id, chat_title)
@@ -208,6 +218,38 @@ class SyncWorker:
         log.error("create_forum_topic: too many retries for '%s'", name)
         return None
 
+
+    async def _test_topic(self, group_id: int, tg_topic_id: int, name: str) -> int | None:
+        for attempt in range(5):
+            try:
+                result = await self.bot.reopen_forum_topic(
+                    chat_id = group_id,
+                    message_thread_id = tg_topic_id,
+                )
+                print(result)
+                return result.message_thread_id
+            except TelegramRetryAfter as e:
+                wait = e.retry_after + 1
+                log.warning("test_exist_forum_topic flood, waiting %ds (attempt %d)",
+                            wait, attempt + 1)
+                await asyncio.sleep(wait)
+            except TelegramBadRequest as e:
+                # Тут можно логировать e.description для точной диагностики
+                description = getattr(e, "description",    None) or getattr(e, "message", "?")
+                if 'TOPIC_ID_INVALID' in description:
+                    log.warning("test_exist_forum_topic Топик не найден, возможно удалён: %s", e)
+                    return False
+                if 'TOPIC_NOT_MODIFIED' in description:
+                    log.warning("test_exist_forum_topic Топик найден, изменения не требуются: %s", e)
+                    return True
+                log.error("test_exist_forum_topic error: %s", e)
+                return False
+            except Exception as e:
+                log.error("test_exist_forum_topic error: %s", e)
+                return None
+        log.error("test_exist_forum_topic: too many retries for '%s'", group_id)
+        return None
+
     async def _notify(self, group_id: int, text: str):
         for attempt in range(3):
             try:
@@ -232,17 +274,19 @@ def _chat_id(chat) -> str:
             return str(val)
     return ""
 
-
-def _chat_title(chat) -> str:
+async def _chat_title(chat, client) -> str:
     """Извлекает название чата."""
     #Находим сервисные чаты и ботов
     if getattr(chat, 'has_bots', False):
         if (getattr(chat, 'options', None) or {}).get('SERVICE_CHAT', False):
             ctitle = 'MAX service Chat'
+            return ctitle
         else:
             ctitle = f"MAX Bot: {next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))}" 
+            return ctitle
     if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) == 0:
         ctitle = 'MAX Избранное'
+        return ctitle
 
     
     # Групповые чаты — title или name
@@ -251,27 +295,25 @@ def _chat_title(chat) -> str:
         if val:
             return str(val)
 
-    # Личные диалоги — participants  
+    # Личные диалоги — participants   
     if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) != 0:
-        participants = getattr(chat, "participants", None)
-        if participants:
-            try:
-                items = next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))
-
-                for p in items:
-                    # Пропускаем себя если есть me_id
-                    names = getattr(p, "names", None)
-                    if names:
-                        try:
-                            name = f"{getattr(names[0], 'first_name', '')} {getattr(names[0], 'last_name', '')}"
-                            if name:
-                                return str(name)
-                        except (IndexError, StopIteration, KeyError):
-                            pass
-                    for attr in ("name", "first_name", "username"):
-                        val = getattr(p, attr, None)
-                        if val:
-                            return str(val)
+        # Пропускаем себя если есть me_id
+        participant = next(user_id for user_id in getattr(chat, 'participants',    None) if user_id != getattr(chat, 'owner',    '?'))
+        if participant:
+            try: 
+                user = await client._client.fetch_users([participant])
+                names = getattr(user[0], "names", None)
+                if names:
+                    try:
+                        name = f"{getattr(names[0], 'first_name', '')} {getattr(names[0], 'last_name', '')}"
+                        if name:
+                            return str(name)
+                    except (IndexError, StopIteration, KeyError):
+                        pass
+                for attr in ("name", "first_name", "username"):
+                    val = getattr(participant, attr, None)
+                    if val:
+                        return str(val)
             except Exception:
                 pass
 

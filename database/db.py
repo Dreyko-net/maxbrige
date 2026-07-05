@@ -240,6 +240,12 @@ class Database:
         )
         await self._db.commit()
 
+    async def delete_topic_id(self, user_id: int, chat_id: int, tg_topic_id: int):
+        await self._db.execute(
+            "DELETE FROM chats WHERE user_id=? AND max_chat_id=? AND tg_topic_id=?",
+            (user_id, chat_id, tg_topic_id),
+        )
+        await self._db.commit()
     # ── Messages ──────────────────────────────────────────────────────────────
 
     async def save_message(

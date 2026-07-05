@@ -183,7 +183,7 @@ class MaxUserClient:
         try:
             result = await self._client.fetch_history(
                 chat_id   = int(max_chat_id),
-                from_time = to_ts,
+                # from_time = to_ts,
                 backward  = limit,
             )
             if not result:
@@ -191,13 +191,15 @@ class MaxUserClient:
             filtered = [m for m in result if getattr(m, "timestamp", 0) >= from_ts]
             log.info("[user=%s] get_history chat=%s: got %d, filtered %d",
                      self.tg_user_id, max_chat_id, len(result), len(filtered))
-            return filtered
+            return result #filtered
         except Exception as e:
             log.error("[user=%s] get_history error: %s", self.tg_user_id, e)
             return []
 
-    async def send_message(self, max_chat_id: str, text: str) -> Optional[str]:
+    async def send_message(self, max_chat_id: str, text: str, sender_name: Optional[str] = None) -> Optional[str]:
         try:
+            if sender_name:
+                text = f"{sender_name}: {text}"
             result = await self._client.send_message(
                 chat_id=int(max_chat_id), text=text)
             return str(getattr(result, "id", "") or "")
@@ -205,40 +207,43 @@ class MaxUserClient:
             log.error("[user=%s] send_message error: %s", self.tg_user_id, e)
             return None
 
-    async def send_file(self, max_chat_id: str, data: bytes,
-                        filename: str, caption: str = "") -> Optional[str]:
+
+    async def send_file(self, max_chat_id, data, filename, caption="", sender_name: Optional[str] = None):
         try:
             from pymax.files.file import File
             result = await self._client.send_message(
                 chat_id=int(max_chat_id), text=caption,
-                attachments=[File(data=data, filename=filename)])
+                attachments=[File(raw=data, name=filename or "file")])
             return str(getattr(result, "id", "") or "")
         except Exception as e:
             log.error("[user=%s] send_file error: %s", self.tg_user_id, e)
             return None
 
-    async def send_photo(self, max_chat_id: str, data: bytes,
-                         caption: str = "") -> Optional[str]:
+    async def send_photo(self, max_chat_id, data, caption="", sender_name: Optional[str] = None):
         try:
             from pymax.files.photo import Photo
             result = await self._client.send_message(
                 chat_id=int(max_chat_id), text=caption,
-                attachments=[Photo(data=data)])
+                attachments=[Photo(raw=data, name="photo.jpg")])
             return str(getattr(result, "id", "") or "")
         except Exception as e:
             log.error("[user=%s] send_photo error: %s", self.tg_user_id, e)
             return None
 
-    async def download_file(self, chat_id: str, message_id: str,
-                            file_id: int) -> Optional[bytes]:
+    async def download_file(self, chat_id, message_id, file_id):
         try:
             req = await self._client.get_file_by_id(
-                chat_id=int(chat_id), message_id=message_id, file_id=file_id)
-            return getattr(req, "data", None) if req else None
+                chat_id=int(chat_id), message_id=message_id, file_id=int(file_id))
+            if not req or not getattr(req, "url", None):
+                return None
+            import aiohttp
+            async with aiohttp.ClientSession() as s:
+                async with s.get(req.url) as resp:
+                    resp.raise_for_status()
+                    return await resp.read()
         except Exception as e:
             log.error("[user=%s] download_file error: %s", self.tg_user_id, e)
             return None
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
