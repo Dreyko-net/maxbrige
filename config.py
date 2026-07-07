@@ -16,7 +16,7 @@ TG_PROXY: str = os.getenv("TG_PROXY", "")
 
 # ── Пути ─────────────────────────────────────────────────────────────────────
 DEFAULT_PATH  = Path(__file__).parent
-BASE_DIR      = Path(os.getenv("BASE_DIR", DEFAULT_PATH)).parent #Path(__file__).parent
+BASE_DIR      = Path(os.getenv("BASE_DIR", DEFAULT_PATH)) #Path(__file__).parent
 SESSIONS_DIR  = BASE_DIR / "sessions"   # папки сессий pymax по пользователям
 DB_PATH       = BASE_DIR / "bridge.db"  # основная SQLite база
 
