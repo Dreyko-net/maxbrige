@@ -55,7 +55,7 @@ async def main():
 
     try:
         #await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
-        asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"]))
+        asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"],handle_signals=False))
     finally:
         await manager.stop()
         await db.close()
