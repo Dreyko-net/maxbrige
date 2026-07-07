@@ -10,7 +10,7 @@ import sys
 
 from aiogram import Bot
 
-from config import TG_BOT_TOKEN
+from config import TG_BOT_TOKEN, TG_PROXY
 from database import db
 from bridge.manager import manager
 from telegram import create_bot
@@ -28,7 +28,8 @@ log = logging.getLogger(__name__)
 # Отключаем лишние логи pymax
 logging.getLogger("pymax").setLevel(logging.WARNING)
 logging.getLogger("aiogram").setLevel(logging.INFO)
-logging.getLogger("aiogram.dispatcher").setLevel(logging.CRITICAL)
+if TG_PROXY != '':
+    logging.getLogger("aiogram.dispatcher").setLevel(logging.CRITICAL)
 
 
 async def main():

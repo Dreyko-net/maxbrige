@@ -20,7 +20,7 @@ class LogAllUpdatesMiddleware(BaseMiddleware):
 
 
 def create_bot(token: str) -> tuple[Bot, Dispatcher]:
-    proxy = TG_PROXY.rstrip("/") if TG_PROXY else ""
+    proxy = TG_PROXY.rstrip("/") if TG_PROXY != '' else ""
 
     if proxy:
         # log.info("Using Telegram API proxy: %s", proxy)
