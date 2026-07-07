@@ -70,6 +70,7 @@ class SyncWorker:
 
             db_chat = await db.upsert_chat(user.id, chat_id, chat_title)
             #Проверка существует ли топик/тема. Если нет то создать снова.
+            test_topic = None
             if db_chat.tg_topic_id:
                 test_topic = await self._test_topic(tg_group_id, db_chat.tg_topic_id, chat_title)
                 #Если False то значить не существует, None скорее всего сетевая ошибка
