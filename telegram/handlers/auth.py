@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from aiogram import Router, F, Bot
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart,Command
 from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, ADMINISTRATOR
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -29,14 +29,15 @@ log = logging.getLogger(__name__)
 router = Router()
 
 # tg_user_id → TelegramSmsCodeProvider
-_pending_auth: dict[int, TelegramSmsCodeProvider] = {}
-_pending_2fa_auth: dict[int, TelegramPasswordProvider] = {}
+pending_auth: dict[int, TelegramSmsCodeProvider] = {}
+pending_2fa_auth: dict[int, TelegramPasswordProvider] = {}
 
 # tg_user_id → asyncio.Task авторизации (чтобы можно было отменить)
-_auth_tasks: dict[int, asyncio.Task] = {}
+auth_tasks: dict[int, asyncio.Task] = {}
 
 
 class AuthStates(StatesGroup):
+    WAIT_INIT  = State()
     WAIT_PHONE = State()
     WAIT_SMS   = State()
     WAIT_2FA   = State()
@@ -45,14 +46,18 @@ class AuthStates(StatesGroup):
 
 
 # ── Клавиатуры ────────────────────────────────────────────────────────────────
+def init_connect_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Начать подключение к Max", callback_data="max_connect"),
+    ]])
 
-def _step1_kb() -> InlineKeyboardMarkup:
+def step1_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
     ]])
 
 
-def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
+def step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     add_url = (
         f"https://t.me/{bot_username}?startgroup=setup"
         f"&admin=manage_topics+post_messages+delete_messages"
@@ -65,7 +70,7 @@ def _step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def _cancel_kb() -> InlineKeyboardMarkup:
+def cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="❌ Отменить авторизацию", callback_data="cancel_auth"),
     ]])
@@ -82,61 +87,83 @@ STEP1_TEXT = (
 )
 
 
-async def _send_step1(bot: Bot, chat_id: int):
+async def send_step1(bot: Bot, chat_id: int):
     await bot.send_message(chat_id, STEP1_TEXT, parse_mode="HTML",
-                           reply_markup=_step1_kb())
+                           reply_markup=step1_kb())
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
-    user_id = msg.from_user.id
-    log.info("[/start] user_id=%s", user_id)
+    user_id = msg.from_user.id  
+    log.info("[/start] fresh auth flow")
+    await msg.answer(
+        "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
+        "Бот обеспечивает пересылку сообщений из MAX в Вашу группу Телеграмм\n"
+        "Для корректной работы необходимо:\n"
+        "1. Иметь зарегистрированный в Max номер телефона (формат: <code>+79001234567</code>)\n"
+        "2. Необходимо будет создать Группу в Телеграм, куда Бот будет направлять все сообщения из Max\n"
+        "3. Добавить Бота, Администратором группы в Телеграм\n"
+        "4. Группа в Телеграм будет сформированна в виде форума, для деления между чатами Max\n",
+        parse_mode="HTML",
+        reply_markup=init_connect_kb(),
+    )
+    await state.set_state(AuthStates.WAIT_INIT)
 
+# ── Callback max_connect ────────────────────────────────────────────────────────────────────
+@router.callback_query(F.data == "max_connect")
+@router.message(AuthStates.WAIT_INIT)
+async def cb_max_connect(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    me = await bot.get_me()
+    user_id = callback.from_user.id
+    log.info("[max_connect] user_id=%s", user_id)
+    
     # Если уже идёт авторизация — предлагаем отменить
-    if user_id in _auth_tasks and not _auth_tasks[user_id].done():
+    if user_id in auth_tasks and not auth_tasks[user_id].done():
         await msg.answer(
             "⏳ Авторизация уже выполняется.\n"
             "Если хотите начать заново — отмените текущую.",
-            reply_markup=_cancel_kb(),
+            reply_markup=cancel_kb(),
         )
         return
 
     user = await db.get_user(user_id)
-    log.info("[/start] db_user=%s status=%s tg_group_id=%s",
+    log.info("[max_connect] db_user=%s status=%s tg_group_id=%s",
              user.id if user else None,
              user.status if user else None,
              user.tg_group_id if user else None)
 
     if user and user.status == "active":
         client = manager.get_client(user_id)
-        log.info("[/start] client_in_pool=%s", client is not None)
+        log.info("[max_connect] client_in_pool=%s", client is not None)
 
         if client and user.tg_group_id:
-            await msg.answer("✅ Вы уже подключены к MAX.\nСообщения зеркалируются в вашу группу.")
+            await callback.answer("✅ Вы уже подключены к MAX.\nСообщения зеркалируются в вашу группу.")
             return
 
         if client and not user.tg_group_id:
-            await _send_step1(bot, msg.chat.id)
+            await send_step1(bot, callback.chat.id)
             await state.set_state(AuthStates.WAIT_GROUP)
             return
 
-        log.info("[/start] client not in pool, reconnecting")
-        await msg.answer("🔄 Переподключаюсь к MAX…")
-        asyncio.create_task(_reconnect(user_id, user.max_phone, bot, msg.chat.id, state))
+        log.info("[max_connect] client not in pool, reconnecting")
+        await callback.answer("🔄 Переподключаюсь к MAX…")
+        asyncio.create_task(_reconnect(user_id, user.max_phone, bot, callback.chat.id, state))
         return
-
-    log.info("[/start] fresh auth flow")
-    await msg.answer(
-        "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
-        "Введите ваш номер телефона, зарегистрированный в MAX\n"
+    # await msg.answer(
+    #     "Введите ваш номер телефона, зарегистрированный в MAX\n"
+    #     "(формат: <code>+79001234567</code>):",
+    #     parse_mode="HTML",
+    # )
+    await callback.message.answer(
+       "Введите ваш номер телефона, зарегистрированный в MAX\n"
         "(формат: <code>+79001234567</code>):",
         parse_mode="HTML",
     )
     await state.set_state(AuthStates.WAIT_PHONE)
-
-
 # ── Телефон ───────────────────────────────────────────────────────────────────
 
 @router.message(AuthStates.WAIT_PHONE)
@@ -151,13 +178,13 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
     await state.update_data(phone=phone)
 
     provider = TelegramSmsCodeProvider(tg_user_id=tg_user_id, bot=bot, chat_id=msg.chat.id)
-    _pending_auth[tg_user_id] = provider
+    pending_auth[tg_user_id] = provider
     provider_2fa = TelegramPasswordProvider(tg_user_id=tg_user_id, bot=bot, chat_id=msg.chat.id)
-    _pending_2fa_auth[tg_user_id] = provider_2fa
+    pending_2fa_auth[tg_user_id] = provider_2fa
     await msg.answer(
         f"📲 Подключаюсь к MAX с номером <code>{phone}</code>…",
         parse_mode="HTML",
-        reply_markup=_cancel_kb(),
+        reply_markup=cancel_kb(),
     )
     await db.create_user(
         tg_user_id   = tg_user_id,
@@ -168,10 +195,10 @@ async def handle_phone(msg: Message, state: FSMContext, bot: Bot):
     await state.set_state(AuthStates.WAIT_SMS)
 
     task = asyncio.create_task(
-        _run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider, provider_2fa=provider_2fa,
+        run_auth(tg_user_id=tg_user_id, phone=phone, provider=provider, provider_2fa=provider_2fa,
                   bot=bot, chat_id=msg.chat.id, state=state)
     )
-    _auth_tasks[tg_user_id] = task
+    auth_tasks[tg_user_id] = task
 
 
 # ── SMS-код ───────────────────────────────────────────────────────────────────
@@ -185,7 +212,7 @@ async def handle_sms_code(msg: Message, state: FSMContext):
 
     tg_user_id = msg.from_user.id
     log.info("[auth] sms code entered user=%s", tg_user_id)
-    provider = _pending_auth.get(tg_user_id)
+    provider = pending_auth.get(tg_user_id)
     if not provider:
         await msg.answer("⚠️ Сессия устарела. Начните заново: /start")
         await state.clear()
@@ -203,7 +230,7 @@ async def handle_2FA_code(msg: Message, state: FSMContext):
     
     tg_user_id = msg.from_user.id
     log.info("[auth] 2fa code entered user=%s", tg_user_id)
-    provider_2fa = _pending_2fa_auth.get(tg_user_id)
+    provider_2fa = pending_2fa_auth.get(tg_user_id)
     if not provider_2fa:
         await msg.answer("⚠️ Сессия устарела. Начните заново: /start")
         await state.clear()
@@ -221,7 +248,7 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
     tg_user_id = callback.from_user.id
 
     # Отменяем задачу авторизации
-    task = _auth_tasks.pop(tg_user_id, None)
+    task = auth_tasks.pop(tg_user_id, None)
     if task and not task.done():
         task.cancel()
         try:
@@ -230,7 +257,7 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
             pass
 
     # Отменяем провайдер SMS
-    provider = _pending_auth.pop(tg_user_id, None)
+    provider = pending_auth.pop(tg_user_id, None)
     if provider:
         provider.cancelled = True
         provider._event.set()  # разблокируем ожидание если зависло
@@ -259,7 +286,7 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
         "и автоматически назначит бота администратором с нужными правами.\n\n"
         "После добавления бот <b>автоматически</b> начнёт синхронизацию.",
         parse_mode="HTML",
-        reply_markup=_step2_kb(me.username),
+        reply_markup=step2_kb(me.username),
     )
     await state.set_state(AuthStates.WAIT_GROUP)
 
@@ -349,15 +376,15 @@ async def bot_added_as_member(event: ChatMemberUpdated, bot: Bot):
 
 # ── Фоновые функции ───────────────────────────────────────────────────────────
 
-async def _run_auth(tg_user_id, phone, provider, provider_2fa, bot, chat_id, state):
-    log.info("[auth] _run_auth started user=%s", tg_user_id)
+async def run_auth(tg_user_id, phone, provider, provider_2fa, bot, chat_id, state):
+    log.info("[auth] run_auth started user=%s", tg_user_id)
     try:
         client = await manager.connect_user(
             tg_user_id=tg_user_id, max_phone=phone, sms_code_provider=provider, password_provider = provider_2fa)
         log.info("[auth] connect_user done user=%s me=%s", tg_user_id, client.me)
 
-        _pending_auth.pop(tg_user_id, None)
-        _auth_tasks.pop(tg_user_id, None)
+        pending_auth.pop(tg_user_id, None)
+        auth_tasks.pop(tg_user_id, None)
         await db.set_user_active(tg_user_id)
         await state.set_state(AuthStates.WAIT_GROUP)
 
@@ -367,17 +394,17 @@ async def _run_auth(tg_user_id, phone, provider, provider_2fa, bot, chat_id, sta
             f"✅ Авторизован в MAX как <b>{me_name}</b>",
             parse_mode="HTML",
         )
-        await _send_step1(bot, chat_id)
+        await send_step1(bot, chat_id)
 
     except asyncio.CancelledError:
         log.info("[auth] task cancelled user=%s", tg_user_id)
-        _pending_auth.pop(tg_user_id, None)
-        _auth_tasks.pop(tg_user_id, None)
+        pending_auth.pop(tg_user_id, None)
+        auth_tasks.pop(tg_user_id, None)
         await state.clear()
     except Exception as e:
         log.error("[auth] error user=%s: %s", tg_user_id, e, exc_info=True)
-        _pending_auth.pop(tg_user_id, None)
-        _auth_tasks.pop(tg_user_id, None)
+        pending_auth.pop(tg_user_id, None)
+        auth_tasks.pop(tg_user_id, None)
         await state.clear()
         await bot.send_message(
             chat_id,
@@ -396,7 +423,7 @@ async def _reconnect(tg_user_id, phone, bot, chat_id, state):
         log.info("[reconnect] done user=%s", tg_user_id)
         user = await db.get_user(tg_user_id)
         if user and not user.tg_group_id:
-            await _send_step1(bot, chat_id)
+            await send_step1(bot, chat_id)
             await state.set_state(AuthStates.WAIT_GROUP)
         else:
             await bot.send_message(chat_id, "✅ Переподключено к MAX.")
