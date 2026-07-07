@@ -11,7 +11,7 @@ from typing import Optional
 
 from config import DB_PATH, MEDIA_CACHE_HOURS
 
-
+print(DB_PATH)
 # ── Dataclasses ───────────────────────────────────────────────────────────────
 
 @dataclass

@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from pymax import Client, Message
+from pymax import Client, Message, ExtraConfig
+from pymax.api.session.enums import DeviceType
 
 from bridge.queue import BridgeEvent, max_to_tg_queue
 from config import SESSIONS_DIR
@@ -47,7 +48,8 @@ class MaxUserClient:
             work_dir          = self.session_path,
             session_name      = "session.db",
             sms_code_provider = self._sms_provider,
-            password_provider = self._password_provider
+            password_provider = self._password_provider,
+            extra_config=ExtraConfig(device_type=DeviceType.ANDROID)
         )
 
     async def start(self) -> None:
