@@ -54,8 +54,8 @@ async def main():
     print("🚀  Бот запущен. Нажмите Ctrl+C для остановки.\n")
 
     try:
-        #await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
-        asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"]))
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
+        # asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"]))
     finally:
         await manager.stop()
         await db.close()
