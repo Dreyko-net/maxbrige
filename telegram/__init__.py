@@ -23,12 +23,12 @@ def create_bot(token: str) -> tuple[Bot, Dispatcher]:
     proxy = TG_PROXY.rstrip("/") if TG_PROXY else ""
 
     if proxy:
-        log.info("Using Telegram API proxy: %s", proxy)
+        # log.info("Using Telegram API proxy: %s", proxy)
         server = TelegramAPIServer.from_base(proxy)
-        log.info("API URL template: %s", server.base)
+        # log.info("API URL template: %s", server.base)
         # Проверяем что URL корректный
-        test_url = server.base.format(token=token, method="getMe")
-        log.info("Test getMe URL: %s", test_url)
+        # test_url = server.base.format(token=token, method="getMe")
+        # log.info("Test getMe URL: %s", test_url)
         session = AiohttpSession(api=server)
         bot = Bot(token=token, session=session)
     else:
