@@ -45,7 +45,7 @@ class TelegramSmsCodeProvider:
 
         await self.bot.send_message(
             chat_id    = self.chat_id,
-            text       = f"📱 На номер <code>{phone}</code> отправлен SMS-код.\n"
+            text       = f"📱 На номер <code>{phone}</code> отправлен SMS-код. (Если есть авторизаванный аккаунт MAX, то код может отправиться в него через Бота \"Коды подтверждения\" \n"
                          f"Введите его в этот чат:",
             parse_mode = "HTML",
         )
