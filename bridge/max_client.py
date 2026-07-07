@@ -185,7 +185,7 @@ class MaxUserClient:
         try:
             result = await self._client.fetch_history(
                 chat_id   = int(max_chat_id),
-                # from_time = to_ts,
+                from_time = to_ts,
                 backward  = limit,
             )
             if not result:
@@ -193,7 +193,7 @@ class MaxUserClient:
             filtered = [m for m in result if getattr(m, "timestamp", 0) >= from_ts]
             log.info("[user=%s] get_history chat=%s: got %d, filtered %d",
                      self.tg_user_id, max_chat_id, len(result), len(filtered))
-            return result #filtered
+            return filtered
         except Exception as e:
             log.error("[user=%s] get_history error: %s", self.tg_user_id, e)
             return []
