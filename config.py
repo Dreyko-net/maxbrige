@@ -37,3 +37,10 @@ FLOOD_SLEEP: float = float(os.getenv("FLOOD_SLEEP", "0.05"))
 
 # ── Служебная тема ────────────────────────────────────────────────────────────
 CONTROL_TOPIC_NAME: str = "⚙️ Управление"
+
+# ── Настройки тестирования и разработки ───────────────────────────────────────
+if os.getenv("DEBUG", False):
+    # Получать ли сиглалы от ОС для остановки (Ctrl+C например)
+    HANDLE_SIGNALS = True
+else:
+    HANDLE_SIGNALS = False

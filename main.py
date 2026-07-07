@@ -7,10 +7,11 @@ MAX ↔ Telegram Bridge
 import asyncio
 import logging
 import sys
+import os
 
 from aiogram import Bot
 
-from config import TG_BOT_TOKEN, TG_PROXY
+from config import TG_BOT_TOKEN, TG_PROXY, HANDLE_SIGNALS
 from database import db
 from bridge.manager import manager
 from telegram import create_bot
@@ -53,10 +54,10 @@ async def main():
 
     log.info("Starting Telegram bot polling…")
     print("🚀  Бот запущен. Нажмите Ctrl+C для остановки.\n")
-
+    #Переменной окружения Debug корректируем где будет запускаться
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
-        # asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"]))
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"], handle_signals=HANDLE_SIGNALS)
+        # asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"],handle_signals=False))
     finally:
         await manager.stop()
         await db.close()
