@@ -100,15 +100,14 @@ class SyncWorker:
         )
 
     async def sync_full_history(self, user, client, db_chats):
-        """Загружает всю историю: от самых старых сообщений к новым."""
+        """Загружает историю: сначала сохраняет в БД, затем отправляет в TG."""
+        from bridge.max_client import _detect_media
         now = _now_ms()
         try:
             for db_chat in db_chats:
                 if not db_chat.tg_topic_id:
                     continue
 
-                # get_history уже возвращает отсортированными (старые → новые)
-                # from_ts=self._client.me.contact.registration_time — вся история с момента регистрации, to_ts=now — до текущего момента
                 messages = await client.get_history(
                     max_chat_id = db_chat.max_chat_id,
                     from_ts     = client.me.contact.registration_time,
@@ -122,17 +121,100 @@ class SyncWorker:
                 log.info("Syncing %d messages for chat %s (user %s)",
                          len(messages), db_chat.max_chat_id, user.tg_user_id)
 
-                # Сообщения уже отсортированы — отправляем как есть
+                # ── Этап 1: сохраняем все сообщения в БД (с дедупликацией) ──
+                new_count = 0
+                dup_count = 0
+                for msg in messages:
+                    msg_id    = str(getattr(msg, "id", "") or "")
+                    timestamp = getattr(msg, "time", 0) or getattr(msg, "timestamp", 0)
+                    sender    = getattr(msg, "sender", None)
+                    has_media, _ = _detect_media(msg)
+
+                    db_id = await db.save_message_dedup(
+                        user_id       = user.id,
+                        chat_id       = db_chat.id,
+                        direction     = "max_to_tg",
+                        timestamp     = timestamp,
+                        max_sender_id = sender,
+                        max_msg_id    = msg_id,
+                        has_media     = has_media,
+                    )
+                    if db_id is not None:
+                        new_count += 1
+                    else:
+                        dup_count += 1
+
+                log.info(
+                    "Chat %s: saved %d new, %d duplicates",
+                    db_chat.max_chat_id, new_count, dup_count,
+                )
+
+                # ── Этап 2: отправляем в Telegram, обновляем маппинг ──
+                sent_count = 0
                 for msg in messages:
                     try:
-                        await self._forward_msg_to_tg(user, client, db_chat, msg)
+                        msg_id    = str(getattr(msg, "id", "") or "")
+                        timestamp = getattr(msg, "time", 0) or getattr(msg, "timestamp", 0)
+                        sender    = getattr(msg, "sender", None)
+                        text      = getattr(msg, "text", "") or ""
+                        sender_name = await client.get_client(sender) if sender else ""
+                        has_media, media_type = _detect_media(msg)
+
+                        # Проверяем — есть ли уже tg_msg_id (от предыдущей синхронизации)
+                        existing = await db.get_message_by_max_for_user(
+                            user.id, db_chat.id, msg_id,
+                        )
+                        if existing and existing.tg_msg_id:
+                            # Уже отправляли — пропускаем
+                            continue
+
+                        from telegram.sender import format_history_message, send_to_telegram_topic
+
+                        formatted = format_history_message(
+                            sender_name = sender_name,
+                            text        = text,
+                            timestamp   = timestamp,
+                            has_media   = has_media,
+                            media_type  = media_type,
+                        )
+
+                        sent_msg = await send_to_telegram_topic(
+                            bot      = self.bot,
+                            group_id = user.tg_group_id,
+                            topic_id = db_chat.tg_topic_id,
+                            text     = formatted,
+                        )
+
+                        if sent_msg:
+                            # Обновляем tg_msg_id в записи
+                            await db.update_tg_msg_id_by_max(
+                                user.id, db_chat.id, msg_id, sent_msg.message_id,
+                            )
+                            sent_count += 1
+
+                            # Медиа-кнопка
+                            if has_media and existing:
+                                from telegram.keyboards import media_download_kb
+                                try:
+                                    await self.bot.edit_message_reply_markup(
+                                        chat_id      = user.tg_group_id,
+                                        message_id   = sent_msg.message_id,
+                                        reply_markup = media_download_kb(existing.id, msg_id),
+                                    )
+                                except Exception:
+                                    pass
+
                         await asyncio.sleep(FLOOD_SLEEP)
                     except Exception as e:
-                        log.error("Sync message error: %s", e)
+                        log.error("Send to TG error: %s", e)
 
                 await db.set_chat_synced(db_chat.id)
-                await self._notify(user.tg_group_id,
-                               f"Загружена история по чату <b>{db_chat.max_chat_title}</b>. Количество загруженных сообщений {len(messages)}.")
+                await self._notify(
+                    user.tg_group_id,
+                    f"Чат {db_chat.max_chat_title}: "
+                    f"новых {new_count}, дубликатов {dup_count}, "
+                    f"отправлено в TG {sent_count}.",
+                )
                 await asyncio.sleep(1)
 
             await self._notify(user.tg_group_id,
@@ -140,7 +222,7 @@ class SyncWorker:
         except Exception as e:
             log.error("Full history sync error for user %s: %s",
                       user.tg_user_id, e, exc_info=True)
-
+            
     async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
         if not db_chat.tg_topic_id:
             return

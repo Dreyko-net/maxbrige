@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_msg_tg  ON messages(tg_msg_id);
 CREATE INDEX IF NOT EXISTS idx_msg_max ON messages(max_msg_id);
 CREATE INDEX IF NOT EXISTS idx_msg_ts  ON messages(timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_max_unique ON messages(user_id, chat_id, max_msg_id);
 
 CREATE TABLE IF NOT EXISTS media_cache (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,6 +300,63 @@ class Database:
             "UPDATE messages SET tg_msg_id=? WHERE id=?", (tg_msg_id, message_id)
         )
         await self._db.commit()
+
+    async def save_message_dedup(
+        self,
+        user_id: int,
+        chat_id: int,
+        direction: str,
+        timestamp: int,
+        max_sender_id: int,
+        max_msg_id: Optional[str] = None,
+        has_media: bool = False,
+    ) -> int | None:
+        """Сохраняет сообщение с дедупликацией по max_msg_id.
+        Возвращает id записи или None если сообщение уже существует."""
+        if max_msg_id is None:
+            # Без max_msg_id уникальность не работает — обычная вставка
+            cur = await self._db.execute(
+                """INSERT INTO messages
+                   (user_id, chat_id, max_sender_id, max_msg_id, direction, has_media, timestamp)
+                   VALUES (?, ?, ?, NULL, ?, ?, ?)""",
+                (user_id, chat_id, max_sender_id, direction, int(has_media), timestamp),
+            )
+            await self._db.commit()
+            return cur.lastrowid
+
+        cur = await self._db.execute(
+            """INSERT INTO messages
+               (user_id, chat_id, max_sender_id, max_msg_id, direction, has_media, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, chat_id, max_msg_id) DO NOTHING""",
+            (user_id, chat_id, max_sender_id, max_msg_id, direction,
+             int(has_media), timestamp),
+        )
+        await self._db.commit()
+        return cur.lastrowid  # None если дубликат
+
+    async def update_tg_msg_id_by_max(
+        self, user_id: int, chat_id: int, max_msg_id: str, tg_msg_id: int
+    ):
+        """Обновляет tg_msg_id по max_msg_id."""
+        await self._db.execute(
+            """UPDATE messages SET tg_msg_id=?
+               WHERE user_id=? AND chat_id=? AND max_msg_id=?""",
+            (tg_msg_id, user_id, chat_id, max_msg_id),
+        )
+        await self._db.commit()
+
+    async def get_message_by_max_for_user(
+        self, user_id: int, chat_id: int, max_msg_id: str
+    ) -> Optional[Message]:
+        """Ищет сообщение по max_msg_id в пределах конкретного чата пользователя."""
+        async with self._db.execute(
+            """SELECT * FROM messages
+               WHERE user_id=? AND chat_id=? AND max_msg_id=?""",
+            (user_id, chat_id, max_msg_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return _message(row) if row else None
 
     # ── Media cache ───────────────────────────────────────────────────────────
 
