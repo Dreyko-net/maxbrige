@@ -102,9 +102,8 @@ async def send_to_telegram(
     Если есть медиа — добавляет кнопку "📎 Загрузить".
     """
     from telegram.keyboards import media_download_kb
-
     # Имя отправителя пока берём из event (можно расширить)
-    sender_name = ""  # живые сообщения не несут имя в текущей версии pymax
+    sender_name = await max_client.get_client(event.max_sender_id) if event.max_sender_id else ""
 
     text = format_live_message(
         sender_name = sender_name,
@@ -128,6 +127,7 @@ async def send_to_telegram(
         chat_id    = chat.id,
         direction  = "max_to_tg",
         timestamp  = event.timestamp,
+        max_sender_id = event.max_sender_id,
         max_msg_id = event.max_msg_id,
         tg_msg_id  = sent.message_id,
         has_media  = event.has_media,

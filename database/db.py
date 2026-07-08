@@ -21,6 +21,7 @@ class User:
     max_phone:    str
     session_path: str          # work_dir для pymax
     tg_group_id:  Optional[int]
+    max_user_id:  Optional[int] #ID пользователя в Max
     status:       str
     created_at:   int
 
@@ -39,6 +40,7 @@ class Chat:
 class Message:
     id:         int
     user_id:    int
+    max_sender_id: int #ID отправителя сообщения в Max
     chat_id:    int
     max_msg_id: Optional[str]
     tg_msg_id:  Optional[int]
@@ -72,6 +74,7 @@ CREATE TABLE IF NOT EXISTS users (
     max_phone       TEXT NOT NULL,
     session_path    TEXT NOT NULL,
     tg_group_id     INTEGER,
+    max_user_id     INTEGER,
     status          TEXT NOT NULL DEFAULT 'pending',
     created_at      INTEGER NOT NULL
 );
@@ -89,6 +92,7 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    max_sender_id INTEGER,
     chat_id     INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     max_msg_id  TEXT,
     tg_msg_id   INTEGER,
@@ -182,6 +186,14 @@ class Database:
         )
         await self._db.commit()
 
+    async def set_max_user_id(self, tg_user_id: int, max_user_id: int):
+        await self._db.execute(
+            "UPDATE users SET max_user_id=? WHERE tg_user_id=?",
+            (max_user_id, tg_user_id),
+        )
+        await self._db.commit()
+        
+
     # ── Chats ─────────────────────────────────────────────────────────────────
 
     async def upsert_chat(
@@ -253,15 +265,16 @@ class Database:
         chat_id: int,
         direction: str,
         timestamp: int,
+        max_sender_id: int,
         max_msg_id: Optional[str] = None,
         tg_msg_id: Optional[int] = None,
         has_media: bool = False,
     ) -> int:
         cur = await self._db.execute(
             """INSERT INTO messages
-               (user_id, chat_id, max_msg_id, tg_msg_id, direction, has_media, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, chat_id, max_msg_id, tg_msg_id, direction,
+               (user_id, chat_id, max_sender_id, max_msg_id, tg_msg_id, direction, has_media, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, chat_id, max_sender_id, max_msg_id, tg_msg_id, direction,
              int(has_media), timestamp),
         )
         await self._db.commit()
@@ -338,7 +351,7 @@ def _user(r) -> User:
     return User(
         id=r["id"], tg_user_id=r["tg_user_id"], tg_username=r["tg_username"],
         max_phone=r["max_phone"], session_path=r["session_path"],
-        tg_group_id=r["tg_group_id"], status=r["status"], created_at=r["created_at"],
+        tg_group_id=r["tg_group_id"], max_user_id=r["max_user_id"], status=r["status"], created_at=r["created_at"],
     )
 
 def _chat(r) -> Chat:
@@ -350,7 +363,7 @@ def _chat(r) -> Chat:
 
 def _message(r) -> Message:
     return Message(
-        id=r["id"], user_id=r["user_id"], chat_id=r["chat_id"],
+        id=r["id"], user_id=r["user_id"], max_sender_id=r["max_sender_id"], chat_id=r["chat_id"],
         max_msg_id=r["max_msg_id"], tg_msg_id=r["tg_msg_id"],
         direction=r["direction"], has_media=bool(r["has_media"]),
         timestamp=r["timestamp"],

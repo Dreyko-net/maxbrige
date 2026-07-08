@@ -140,12 +140,14 @@ class MaxUserClient:
                 text      = getattr(msg, "text",      "") or ""
                 msg_id    = str(getattr(msg, "id",    "") or "")
                 chat_id   = str(getattr(msg, "chat_id", "") or "")
+                max_sender_id   = str(getattr(msg, "sender", "") or "")
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
                 has_media, media_type = _detect_media(msg)
                 event = BridgeEvent(
                     direction   = "max_to_tg",
                     tg_user_id  = self.tg_user_id,
                     max_chat_id = chat_id,
+                    max_sender_id = max_sender_id,
                     text        = text,
                     timestamp   = timestamp,
                     max_msg_id  = msg_id,
@@ -202,23 +204,55 @@ class MaxUserClient:
             log.error("[user=%s] get_user error: %s", self.tg_user_id, e)
             return None
 
-    async def get_history(self, max_chat_id: str, from_ts: int,
-                          to_ts: int, limit: int = 100) -> list:
-        try:
-            result = await self._client.fetch_history(
-                chat_id   = int(max_chat_id),
-                from_time = to_ts,
-                backward  = limit,
-            )
-            if not result:
-                return []
-            filtered = [m for m in result if getattr(m, "time", 0) >= from_ts]
-            log.info("[user=%s] get_history chat=%s: got %d, filtered %d",
-                     self.tg_user_id, max_chat_id, len(result), len(filtered))
-            return filtered
-        except Exception as e:
-            log.error("[user=%s] get_history error: %s", self.tg_user_id, e)
-            return []
+    async def get_history(self, max_chat_id: str, from_ts: int, to_ts: int, limit: int = 100) -> list:
+        """
+        Пагинированно загружает всю историю от from_ts до to_ts.
+        Возвращает сообщения отсортированные от старых к новым.
+        """
+        all_messages = []
+        anchor = self._client.me.contact.registration_time # Запрашиваем все сообщения с момента регистрации #to_ts
+
+        while True:
+            try:
+                batch = await self._client.fetch_history(
+                    chat_id   = int(max_chat_id),
+                    from_time = anchor,
+                    forward   = limit,
+                )
+            except Exception as e:
+                log.error("[user=%s] get_history fetch error: %s",
+                          self.tg_user_id, e)
+                break
+
+            
+            # Добавляем все
+            for m in batch:
+                all_messages.append(m)
+            if len(batch) < limit:
+                break
+
+            # # Фильтруем по диапазону и добавляем
+            # for m in batch:
+            #     msg_time = getattr(m, "time", 0) or 0
+            #     if from_ts <= msg_time <= to_ts:
+            #         all_messages.append(m)
+
+            # # Смещаем якорь на время самого старого сообщения в батче
+            # times = [getattr(m, "time", 0) or 0 for m in batch]
+            # oldest = max(times)
+
+            # if oldest <= from_ts:
+            #     break  # дошли до начала нужного диапазона
+
+            anchor = batch[limit-1].time + 1
+            await asyncio.sleep(0.3)  # пауза между запросами
+
+        # Сортируем: старые → новые
+        all_messages.sort(key=lambda m: getattr(m, "time", 0) or 0)
+
+        log.info("[user=%s] get_history chat=%s: total %d messages",
+                 self.tg_user_id, max_chat_id, len(all_messages))
+        return all_messages
 
     async def send_message(self, max_chat_id: str, text: str, sender_name: Optional[str] = None) -> Optional[str]:
         try:

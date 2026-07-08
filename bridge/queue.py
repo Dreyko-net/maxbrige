@@ -24,6 +24,7 @@ class BridgeEvent:
     max_chat_id: str          # ID чата в MAX
     text:        str
     timestamp:   int
+    max_sender_id: int | None = None
     max_msg_id:  str  | None = None
     tg_msg_id:   int  | None = None
     # медиа

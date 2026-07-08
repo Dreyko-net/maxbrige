@@ -360,6 +360,7 @@ async def start_sync_msg(msg: Message, bot: Bot):
     if client:
         sync = SyncWorker(bot=bot, manager=manager)
         asyncio.create_task(sync.full_sync(user=user, client=client))
+        # await db.set_max_user_id(tg_user_id, max_user_id)
     else:
         await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Напишите /sync после перезапуска бота.")
 

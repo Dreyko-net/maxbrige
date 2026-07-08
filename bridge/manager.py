@@ -188,7 +188,7 @@ class BridgeManager:
             event      = event,
             user       = user,
             chat       = chat,
-            max_client = self.get_client(event.tg_user_id),
+            max_client = self.get_client(event.tg_user_id)
         )
 
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────

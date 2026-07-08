@@ -87,7 +87,7 @@ class SyncWorker:
                     await db.set_topic_id(db_chat.id, topic_id)
                     db_chat.tg_topic_id = topic_id
                 await asyncio.sleep(2)
-
+            
             db_chats.append(db_chat)
 
         await self._notify(tg_group_id,
@@ -96,10 +96,10 @@ class SyncWorker:
 
         # 3. Полная синхронизация — от старых к новым, в фоне
         asyncio.create_task(
-            self._sync_full_history(user, client, db_chats)
+            self.sync_full_history(user, client, db_chats)
         )
 
-    async def _sync_full_history(self, user, client, db_chats):
+    async def sync_full_history(self, user, client, db_chats):
         """Загружает всю историю: от самых старых сообщений к новым."""
         now = _now_ms()
         try:
@@ -107,9 +107,11 @@ class SyncWorker:
                 if not db_chat.tg_topic_id:
                     continue
 
+                # get_history уже возвращает отсортированными (старые → новые)
+                # from_ts=self._client.me.contact.registration_time — вся история с момента регистрации, to_ts=now — до текущего момента
                 messages = await client.get_history(
                     max_chat_id = db_chat.max_chat_id,
-                    from_ts     = 0,       # с самого начала
+                    from_ts     = client.me.contact.registration_time,
                     to_ts       = now,
                     limit       = 100,
                 )
@@ -120,9 +122,7 @@ class SyncWorker:
                 log.info("Syncing %d messages for chat %s (user %s)",
                          len(messages), db_chat.max_chat_id, user.tg_user_id)
 
-                # Разворачиваем: oldest first → newest last
-                messages = list(reversed(messages))
-
+                # Сообщения уже отсортированы — отправляем как есть
                 for msg in messages:
                     try:
                         await self._forward_msg_to_tg(user, client, db_chat, msg)
@@ -131,6 +131,8 @@ class SyncWorker:
                         log.error("Sync message error: %s", e)
 
                 await db.set_chat_synced(db_chat.id)
+                await self._notify(user.tg_group_id,
+                               f"Загружена история по чату <b>{db_chat.max_chat_title}</b>. Количество загруженных сообщений {len(messages)}.")
                 await asyncio.sleep(1)
 
             await self._notify(user.tg_group_id,
@@ -196,6 +198,7 @@ class SyncWorker:
                 chat_id    = db_chat.id,
                 direction  = "max_to_tg",
                 timestamp  = timestamp,
+                max_sender_id = sender,
                 max_msg_id = msg_id,
                 tg_msg_id  = sent_msg.message_id,
                 has_media  = has_media,
