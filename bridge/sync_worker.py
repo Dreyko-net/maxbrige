@@ -91,34 +91,53 @@ class SyncWorker:
             db_chats.append(db_chat)
 
         await self._notify(tg_group_id,
-                           f"✅ Темы созданы.\n📥 Загружаю сообщения за сегодня…")
+                           f"✅ Темы созданы ({len(db_chats)}).\n"
+                           f"📥 Загружаю полную историю в фоне…")
 
-        # 3. Сначала — сегодня
-        today_start = _today_start_ms()
-        now         = _now_ms()
-        for db_chat in db_chats:
-            await self._sync_chat(user, client, db_chat, from_ts=today_start, to_ts=now)
-
-        await self._notify(tg_group_id,
-                           f"✅ Сообщения за сегодня загружены.\n"
-                           f"📦 Загружаю историю за {HISTORY_DAYS} дней в фоне…")
-
-        # 4. Остальная история — в фоне
+        # 3. Полная синхронизация — от старых к новым, в фоне
         asyncio.create_task(
-            self._sync_history_background(user, client, db_chats, today_start)
+            self._sync_full_history(user, client, db_chats)
         )
 
-    async def _sync_history_background(self, user, client, db_chats, before_ts):
-        from_ts = _days_ago_ms(HISTORY_DAYS)
+    async def _sync_full_history(self, user, client, db_chats):
+        """Загружает всю историю: от самых старых сообщений к новым."""
+        now = _now_ms()
         try:
             for db_chat in db_chats:
-                await self._sync_chat(user, client, db_chat,
-                                      from_ts=from_ts, to_ts=before_ts)
+                if not db_chat.tg_topic_id:
+                    continue
+
+                messages = await client.get_history(
+                    max_chat_id = db_chat.max_chat_id,
+                    from_ts     = 0,       # с самого начала
+                    to_ts       = now,
+                    limit       = 100,
+                )
+                if not messages:
+                    await db.set_chat_synced(db_chat.id)
+                    continue
+
+                log.info("Syncing %d messages for chat %s (user %s)",
+                         len(messages), db_chat.max_chat_id, user.tg_user_id)
+
+                # Разворачиваем: oldest first → newest last
+                messages = list(reversed(messages))
+
+                for msg in messages:
+                    try:
+                        await self._forward_msg_to_tg(user, client, db_chat, msg)
+                        await asyncio.sleep(FLOOD_SLEEP)
+                    except Exception as e:
+                        log.error("Sync message error: %s", e)
+
+                await db.set_chat_synced(db_chat.id)
                 await asyncio.sleep(1)
+
             await self._notify(user.tg_group_id,
-                               f"✅ История за {HISTORY_DAYS} дней загружена.")
+                               f"✅ Полная история загружена.")
         except Exception as e:
-            log.error("Background sync error for user %s: %s", user.tg_user_id, e)
+            log.error("Full history sync error for user %s: %s",
+                      user.tg_user_id, e, exc_info=True)
 
     async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
         if not db_chat.tg_topic_id:
