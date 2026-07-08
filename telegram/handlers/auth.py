@@ -51,6 +51,19 @@ def init_connect_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Начать подключение к Max", callback_data="max_connect"),
     ]])
 
+def bot_add_group_kb(bot_username: str) -> InlineKeyboardMarkup:
+    add_url = (
+        f"https://t.me/{bot_username}?startgroup=setup"
+        f"&admin=manage_topics+post_messages+delete_messages"
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url),
+    ]])
+
+def bot_setting_group_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Разрешаю перенастроить группу для корректной работы.", callback_data="group_setting"),
+    ]])
 def step1_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
@@ -96,20 +109,46 @@ async def send_step1(bot: Bot, chat_id: int):
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
-    user_id = msg.from_user.id  
-    log.info("[/start] fresh auth flow")
-    await msg.answer(
-        "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
-        "Бот обеспечивает пересылку сообщений из MAX в Вашу группу Телеграмм\n"
-        "Для корректной работы необходимо:\n"
-        "1. Иметь зарегистрированный в Max номер телефона (формат: <code>+79001234567</code>)\n"
-        "2. Необходимо будет создать Группу в Телеграм, куда Бот будет направлять все сообщения из Max\n"
-        "3. Добавить Бота, Администратором группы в Телеграм\n"
-        "4. Группа в Телеграм будет сформированна в виде форума, для деления между чатами Max\n",
-        parse_mode="HTML",
-        reply_markup=init_connect_kb(),
-    )
-    await state.set_state(AuthStates.WAIT_INIT)
+    if msg.chat.type in ("supergroup", "group"):
+        log.info("[/start] вызван в группе. Проверяем настройки группы")
+        me = await bot.get_me()
+        member = await bot.get_chat_member(msg.chat.id, bot.id)
+        if member.status == 'member':
+            await msg.answer(
+            "Группа найдена. Необходимо Бота добавить в Администраторы группы с правом изменять группу (для перенастройки в Форум).\n",
+            parse_mode="HTML",
+            reply_markup=bot_add_group_kb(me.username),
+            )
+            await state.set_state(AuthStates.WAIT_GROUP)
+        if member.status == 'administrator':
+            if msg.chat.is_forum == None:
+                log.info("[/start] вызван в группе. Права Администратора есть, но группа не Форум")
+                await msg.answer(
+                f"⚠️ Бот добавлен в группу <b>{msg.chat.title}</b> и является Администраторм, "
+                f"но <b>Темы (Topics)</b> не включены.\n\n"
+                f"Включите: Настройки группы → Темы → Включить\n"
+                f"После этого заново сделайте: /start\n",
+                parse_mode="HTML",
+                )
+                await state.set_state(AuthStates.WAIT_GROUP)
+            else:
+                log.info("[/start] вызван в группе. Настройки корректны.")
+                await start_sync_msg(msg, bot)
+    if msg.chat.type == 'private':
+        user_id = msg.from_user.id  
+        log.info("[/start] fresh auth flow")
+        await msg.answer(
+            "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
+            "Бот обеспечивает пересылку сообщений из MAX в Вашу группу Телеграмм\n"
+            "Для корректной работы необходимо:\n"
+            "1. Иметь зарегистрированный в Max номер телефона (формат: <code>+79001234567</code>)\n"
+            "2. Необходимо будет создать Группу в Телеграм, куда Бот будет направлять все сообщения из Max\n"
+            "3. Добавить Бота, Администратором группы в Телеграм\n"
+            "4. Группа в Телеграм будет сформированна в виде форума, для деления между чатами Max\n",
+            parse_mode="HTML",
+            reply_markup=init_connect_kb(),
+        )
+        await state.set_state(AuthStates.WAIT_INIT)
 
 # ── Callback max_connect ────────────────────────────────────────────────────────────────────
 @router.callback_query(F.data == "max_connect")
@@ -123,7 +162,7 @@ async def cb_max_connect(callback: CallbackQuery, state: FSMContext, bot: Bot):
     
     # Если уже идёт авторизация — предлагаем отменить
     if user_id in auth_tasks and not auth_tasks[user_id].done():
-        await msg.answer(
+        await callback.answer(
             "⏳ Авторизация уже выполняется.\n"
             "Если хотите начать заново — отмените текущую.",
             reply_markup=cancel_kb(),
@@ -145,13 +184,13 @@ async def cb_max_connect(callback: CallbackQuery, state: FSMContext, bot: Bot):
             return
 
         if client and not user.tg_group_id:
-            await send_step1(bot, callback.chat.id)
+            await send_step1(bot, callback.message.chat.id)
             await state.set_state(AuthStates.WAIT_GROUP)
             return
 
         log.info("[max_connect] client not in pool, reconnecting")
         await callback.answer("🔄 Переподключаюсь к MAX…")
-        asyncio.create_task(_reconnect(user_id, user.max_phone, bot, callback.chat.id, state))
+        asyncio.create_task(_reconnect(user_id, user.max_phone, bot, callback.message.chat.id, state))
         return
     # await msg.answer(
     #     "Введите ваш номер телефона, зарегистрированный в MAX\n"
@@ -290,6 +329,39 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
     )
     await state.set_state(AuthStates.WAIT_GROUP)
 
+
+async def start_sync_msg(msg: Message, bot: Bot):
+    group_id = msg.chat.id
+    tg_user_id = msg.from_user.id
+    log.info("[group] bot added as admin to group=%s by user=%s", group_id, tg_user_id)
+
+    user = await db.get_user(tg_user_id)
+    if not user or user.status != "active":
+        log.info("[group] user not found or not active, skipping")
+        return
+
+    if user.tg_group_id and user.tg_group_id != group_id:
+        log.info("[group] user already has different group, skipping")
+        return
+
+    # Сохраняем group_id
+    await db.set_user_group(tg_user_id, group_id)
+    user = await db.get_user(tg_user_id)
+
+    await bot.send_message(
+        group_id,
+        f"🔄 Начинаю синхронизацию чатов MAX…\n\n"
+        f"Прогресс буду отправлять постепенно.",
+        parse_mode="HTML",
+    )
+
+    client = manager.get_client(tg_user_id)
+    log.info("[group] client_in_pool=%s for user=%s", client is not None, tg_user_id)
+    if client:
+        sync = SyncWorker(bot=bot, manager=manager)
+        asyncio.create_task(sync.full_sync(user=user, client=client))
+    else:
+        await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Напишите /sync после перезапуска бота.")
 
 # ── Добавление бота в группу (my_chat_member) ─────────────────────────────────
 # Это событие приходит когда бота добавляют в группу или назначают админом.
@@ -499,3 +571,15 @@ async def cmd_debug_chats(msg: Message):
         await msg.answer("\n".join(lines))
     except Exception as e:
         await msg.answer(f"❌ Ошибка: <code>{e}</code>", parse_mode="HTML")
+
+
+
+# @router.message(Command("test"))
+# async def cmd_test(msg: Message, bot: Bot):
+#     """Тестовыая команда"""
+#     max_user_id = 115482936
+#     test = await client.get_client(marker = max_user_id)
+#     # test = await max_username_title(max_user_id, manager)
+#     print(test)
+#     tg_user_id = msg.from_user.id
+#     user = await db.get_user(tg_user_id)

@@ -179,6 +179,28 @@ class MaxUserClient:
         except Exception as e:
             log.error("[user=%s] get_chats error: %s", self.tg_user_id, e)
             return []
+        
+    async def get_client(self, marker: int = None):
+        try:
+            if marker:
+                user = await self._client.get_user(marker)
+                #else await self._client.fetch_users([marker])
+                if not user:
+                    log.warning("[user=%s] get_user not found user id: %d", self.tg_user_id, marker)
+                    return None
+                # log.info("[user=%s] get_user: found user %s", self.tg_user_id, user)
+                names = getattr(user, "names", None)
+                if names:
+                    try:
+                        name = f"{getattr(names[0], 'first_name', '')} {getattr(names[0], 'last_name', '')}"
+                        if name:
+                            return " ".join(str(name).split())
+                    except (IndexError, StopIteration, KeyError):
+                        pass
+            log.error("[user=%s] get_user error: %s user_id = %d", self.tg_user_id, marker)
+        except Exception as e:
+            log.error("[user=%s] get_user error: %s", self.tg_user_id, e)
+            return None
 
     async def get_history(self, max_chat_id: str, from_ts: int,
                           to_ts: int, limit: int = 100) -> list:
@@ -190,7 +212,7 @@ class MaxUserClient:
             )
             if not result:
                 return []
-            filtered = [m for m in result if getattr(m, "timestamp", 0) >= from_ts]
+            filtered = [m for m in result if getattr(m, "time", 0) >= from_ts]
             log.info("[user=%s] get_history chat=%s: got %d, filtered %d",
                      self.tg_user_id, max_chat_id, len(result), len(filtered))
             return filtered

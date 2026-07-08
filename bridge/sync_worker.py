@@ -22,7 +22,7 @@ from config import HISTORY_DAYS, FLOOD_SLEEP, CONTROL_TOPIC_NAME
 
 if TYPE_CHECKING:
     from aiogram import Bot
-    from bridge.manager import BridgeManager
+    from bridge.manager import BridgeManager, manager
     from bridge.max_client import MaxUserClient
 
 log = logging.getLogger(__name__)
@@ -69,10 +69,10 @@ class SyncWorker:
                 continue
 
             db_chat = await db.upsert_chat(user.id, chat_id, chat_title)
-            #Проверка существует ли топик/тема. Если нет то создать снова.
+            #Проверка существует ли топик/тема. Если нет, то надо создать снова. Если есть, но другое имя, то переименовываем.
             test_topic = None
             if db_chat.tg_topic_id:
-                test_topic = await self._test_topic(tg_group_id, db_chat.tg_topic_id, chat_title)
+                test_topic = await self.test_topic(tg_group_id, db_chat.tg_topic_id, chat_title)
                 #Если False то значить не существует, None скорее всего сетевая ошибка
                 if test_topic == None:
                     log.warning("test_exist_forum_topic Проверка топика выдала ошибку. chat_title: %s, user.id: %s,db_chat.tg_topic_id: %s", chat_title, user.id, db_chat.tg_topic_id)
@@ -151,17 +151,9 @@ class SyncWorker:
 
         text        = getattr(msg, "text",      "") or ""
         msg_id      = str(getattr(msg, "id",    "") or "")
-        timestamp   = getattr(msg, "timestamp", _now_ms())
+        timestamp   = getattr(msg, "time", _now_ms())
         sender      = getattr(msg, "sender",    None)
-        sender_name = ""
-        if sender:
-            names = getattr(sender, "names", None)
-            if names:
-                sender_name = getattr(names[0], "name", "") if names else ""
-            if not sender_name:
-                sender_name = (getattr(sender, "name", "") or
-                               getattr(sender, "username", "") or "")
-
+        sender_name = await client.get_client(sender) if sender else ""
         has_media, media_type = _detect_media(msg)
 
         formatted = format_history_message(
@@ -220,15 +212,15 @@ class SyncWorker:
         return None
 
 
-    async def _test_topic(self, group_id: int, tg_topic_id: int, name: str) -> int | None:
+    async def test_topic(self, group_id: int, tg_topic_id: int, name: str) -> int | None:
         for attempt in range(5):
             try:
-                result = await self.bot.reopen_forum_topic(
-                    chat_id = group_id,
-                    message_thread_id = tg_topic_id,
-                )
-                print(result)
-                return result.message_thread_id
+                result = await self.bot.edit_forum_topic(
+                            chat_id = group_id,
+                            message_thread_id = tg_topic_id,
+                            name    = name[:128],
+                            )#icon_custom_emoji_id 
+                return True
             except TelegramRetryAfter as e:
                 wait = e.retry_after + 1
                 log.warning("test_exist_forum_topic flood, waiting %ds (attempt %d)",
@@ -239,9 +231,11 @@ class SyncWorker:
                 description = getattr(e, "description",    None) or getattr(e, "message", "?")
                 if 'TOPIC_ID_INVALID' in description:
                     log.warning("test_exist_forum_topic Топик не найден, возможно удалён: %s", e)
+                    await asyncio.sleep(0,5)
                     return False
                 if 'TOPIC_NOT_MODIFIED' in description:
                     log.warning("test_exist_forum_topic Топик найден, изменения не требуются: %s", e)
+                    await asyncio.sleep(0,5)
                     return True
                 log.error("test_exist_forum_topic error: %s", e)
                 return False
@@ -283,8 +277,12 @@ async def _chat_title(chat, client) -> str:
             ctitle = 'MAX service Chat'
             return ctitle
         else:
-            ctitle = f"MAX Bot: {next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))}" 
-            return ctitle
+            max_bot_id = next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))
+            # ctitle = f"MAX Bot: {next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))}" 
+            max_bot_name = await client._client.get_user(max_bot_id)
+            max_bot_firstname = getattr(max_bot_name.names[0], 'first_name',    '?') if max_bot_name else 'max_bot_id'
+            ctitle = f"MAX Bot: {max_bot_firstname}"
+            return " ".join(str(ctitle).split())
     if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) == 0:
         ctitle = 'MAX Избранное'
         return ctitle
@@ -302,13 +300,14 @@ async def _chat_title(chat, client) -> str:
         participant = next(user_id for user_id in getattr(chat, 'participants',    None) if user_id != getattr(chat, 'owner',    '?'))
         if participant:
             try: 
-                user = await client._client.fetch_users([participant])
-                names = getattr(user[0], "names", None)
+                #user = await client._client.fetch_users([participant])
+                user = await client._client.get_user(participant)
+                names = getattr(user, "names", None)
                 if names:
                     try:
                         name = f"{getattr(names[0], 'first_name', '')} {getattr(names[0], 'last_name', '')}"
                         if name:
-                            return str(name)
+                            return " ".join(str(name).split())
                     except (IndexError, StopIteration, KeyError):
                         pass
                 for attr in ("name", "first_name", "username"):
