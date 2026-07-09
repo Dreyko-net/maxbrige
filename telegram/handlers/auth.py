@@ -79,9 +79,18 @@ def bot_setting_group_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Разрешаю перенастроить группу для корректной работы.", callback_data="group_setting"),
     ]])
 
-def step1_kb() -> InlineKeyboardMarkup:
+# def step1_kb() -> InlineKeyboardMarkup:
+#     return InlineKeyboardMarkup(inline_keyboard=[[
+#         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
+#     ]])
+
+def step1_kb(bot_username: str) -> InlineKeyboardMarkup:
+    add_url = (
+        f"https://t.me/{bot_username}?startgroup=setup"
+        f"&admin=manage_topics+post_messages+delete_messages"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
+        InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url),
     ]])
 
 
@@ -137,13 +146,12 @@ async def send_step1(bot: Bot, chat_id: int):
 async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
     if msg.chat.type in ("supergroup", "group"):
         log.info("[/start] вызван в группе. Проверяем настройки группы")
-        me = await _send_with_retry(bot.get_me())
-        member = await _send_with_retry(msg.chat.id, bot.id)
+        member = await bot.get_chat_member(msg.chat.id, bot.id)
         if member.status == 'member':
             await msg.answer(
             "Группа найдена. Необходимо Бота добавить в Администраторы группы с правом изменять группу (для перенастройки в Форум).\n",
             parse_mode="HTML",
-            reply_markup=bot_add_group_kb(me.username),
+            reply_markup=bot_add_group_kb(bot._me.username),
             )
             await state.set_state(AuthStates.WAIT_GROUP)
         if member.status == 'administrator':
@@ -347,19 +355,6 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
 async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    for attempt in range(5):
-        try:
-            me = await bot.get_me()
-            return True
-        except TelegramRetryAfter as e:
-            wait = attempt + 1
-            await asyncio.sleep(wait)
-        except TelegramNetworkError as e:
-            wait = 2 ** attempt + 1
-            await asyncio.sleep(wait)
-        except Exception as e:
-            log.error("get_me: error: %s", e)
-            return None
     await callback.message.answer(
         "✅ Отлично!\n\n"
         "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
@@ -368,7 +363,7 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
         "После добавления бот <b>НЕ запускает</b> синхронизацию автоматически.\n"
         "Вы сможете запустить её вручную командой /sync или /sync_chats",
         parse_mode="HTML",
-        reply_markup=step2_kb(me.username),
+        reply_markup=step2_kb(bot._me.username),
     )
     await state.set_state(AuthStates.WAIT_GROUP)
 
