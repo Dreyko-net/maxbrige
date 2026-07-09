@@ -99,7 +99,7 @@ async def _do_status(bot: Bot, chat_id: int, tg_user_id: int):
             f"✅ <b>Подключено к MAX</b>\n\n"
             f"👤 Имя: <b>{max_name}</b>\n"
             f"📱 Телефон: <code>{user.max_phone}</code>\n"
-            f"📁 MAX ID: <code>{getattr(client.me, 'id', '?')}</code>"
+            f"📁 MAX ID: <code>{getattr(client.me.contact, 'id', '?')}</code>"
             f"{group_info}\n"
             f"📌 Статус: <b>{user.status}</b>",
             parse_mode="HTML",
@@ -167,7 +167,38 @@ async def _do_sync_chats(bot: Bot, chat_id: int, tg_user_id: int):
             db_chat = await db.upsert_chat(user.id, cid, ctitle)
             if db_chat.tg_topic_id:
                 # Тема существует — проверяем и обновляем если нужно
-                updated += 1
+                from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
+                for attempt in range(5):
+                    try:
+                        result = await bot.edit_forum_topic(
+                            chat_id = user.tg_group_id,
+                            message_thread_id = db_chat.tg_topic_id,
+                            name    = ctitle[:128],
+                            )
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+                    except TelegramBadRequest as e:
+                        description = getattr(e, "description", None) or getattr(e, "message", "?")
+                        if 'TOPIC_ID_INVALID' in description:
+                            log.warning("test_forum_topic: Topic not found: %s", e)
+                            await asyncio.sleep(2)
+                            updated += 1
+                            break
+                        if 'TOPIC_NOT_MODIFIED' in description:
+                            log.info("test_forum_topic: Topic found: %s", e)
+                            await asyncio.sleep(2)
+                            updated += 1
+                            break
+                    except TelegramNetworkError as e:
+                        # ServerDisconnectedError, ConnectionReset и прочее — пробуем ещё раз
+                        wait = 2 ** attempt + 1  # 2, 3, 5 секунд
+                        log.warning("send retry (network: %s), waiting %ds (attempt %d)",
+                                    type(e).__name__, wait, attempt + 1)
+                        await asyncio.sleep(wait)
+                    except Exception as e:
+                        log.error("create_forum_topic error: %s", e)
+                        break
+                await asyncio.sleep(2)
             else:
                 # Создаём тему
                 from aiogram.exceptions import TelegramRetryAfter
@@ -453,7 +484,7 @@ async def _sync_single_chat(
         await bot.send_message(
             user.tg_group_id,
             f"✅ История чата <b>{db_chat.max_chat_title}</b> загружена.\n"
-            f"Отправлено: {sent_count}, ошибок: {error_count}",
+            f"Загружено: {sent_count}, ошибок: {error_count}",
             parse_mode="HTML",
             message_thread_id=db_chat.tg_topic_id,
         )
