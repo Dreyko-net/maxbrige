@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from aiogram.exceptions import TelegramRetryAfter,TelegramBadRequest
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from database import db, User, Chat
 from config import HISTORY_DAYS, FLOOD_SLEEP, CONTROL_TOPIC_NAME
 
@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from bridge.max_client import MaxUserClient
 
 log = logging.getLogger(__name__)
+
+# Пауза после отправки медиа-сообщения (секунды).
+# Медиа тяжелее текста для Telegram API.
+MEDIA_SLEEP: float = float(FLOOD_SLEEP) + 0.5 if FLOOD_SLEEP < 0.5 else float(FLOOD_SLEEP)
 
 
 def _today_start_ms() -> int:
@@ -87,7 +91,7 @@ class SyncWorker:
                     await db.set_topic_id(db_chat.id, topic_id)
                     db_chat.tg_topic_id = topic_id
                 await asyncio.sleep(2)
-            
+
             db_chats.append(db_chat)
 
         await self._notify(tg_group_id,
@@ -100,8 +104,13 @@ class SyncWorker:
         )
 
     async def sync_full_history(self, user, client, db_chats):
-        """Загружает историю: сначала сохраняет в БД, затем отправляет в TG."""
+        """Загружает историю: сначала сохраняет в БД, затем отправляет в TG с медиа."""
         from bridge.max_client import _detect_media
+        from telegram.sender import (
+            format_history_message,
+            send_media_to_telegram_topic,
+            send_text_to_topic,
+        )
         now = _now_ms()
         try:
             for db_chat in db_chats:
@@ -149,8 +158,9 @@ class SyncWorker:
                     db_chat.max_chat_id, new_count, dup_count,
                 )
 
-                # ── Этап 2: отправляем в Telegram, обновляем маппинг ──
+                # ── Этап 2: отправляем в Telegram с реальным медиа ──
                 sent_count = 0
+                media_count = 0
                 for msg in messages:
                     try:
                         msg_id    = str(getattr(msg, "id", "") or "")
@@ -168,52 +178,54 @@ class SyncWorker:
                             # Уже отправляли — пропускаем
                             continue
 
-                        from telegram.sender import format_history_message, send_to_telegram_topic
-
+                        # Форматируем заголовок (отправитель + время)
+                        # has_media=False — НЕ показываем плейсхолдер, медиа отправим реальное
                         formatted = format_history_message(
                             sender_name = sender_name,
                             text        = text,
                             timestamp   = timestamp,
-                            has_media   = has_media,
+                            has_media   = False,
                             media_type  = media_type,
                         )
 
-                        sent_msg = await send_to_telegram_topic(
-                            bot      = self.bot,
-                            group_id = user.tg_group_id,
-                            topic_id = db_chat.tg_topic_id,
-                            text     = formatted,
-                        )
+                        if has_media:
+                            # Отправляем с реальным медиа-контентом
+                            sent_msg = await send_media_to_telegram_topic(
+                                bot      = self.bot,
+                                group_id = user.tg_group_id,
+                                topic_id = db_chat.tg_topic_id,
+                                text     = formatted,
+                                client   = client,
+                                msg      = msg,
+                                caption  = text[:1024] if text else "",
+                            )
+                            media_count += 1
+                        else:
+                            # Обычное текстовое сообщение
+                            sent_msg = await send_text_to_topic(
+                                bot      = self.bot,
+                                group_id = user.tg_group_id,
+                                topic_id = db_chat.tg_topic_id,
+                                text     = formatted,
+                            )
 
                         if sent_msg:
-                            # Обновляем tg_msg_id в записи
                             await db.update_tg_msg_id_by_max(
                                 user.id, db_chat.id, msg_id, sent_msg.message_id,
                             )
                             sent_count += 1
 
-                            # Медиа-кнопка
-                            if has_media and existing:
-                                from telegram.keyboards import media_download_kb
-                                try:
-                                    await self.bot.edit_message_reply_markup(
-                                        chat_id      = user.tg_group_id,
-                                        message_id   = sent_msg.message_id,
-                                        reply_markup = media_download_kb(existing.id, msg_id),
-                                    )
-                                except Exception:
-                                    pass
-
-                        await asyncio.sleep(FLOOD_SLEEP)
+                        # Большая пауза после медиа, чтобы не словить ServerDisconnectedError
+                        await asyncio.sleep(MEDIA_SLEEP if has_media else FLOOD_SLEEP)
                     except Exception as e:
                         log.error("Send to TG error: %s", e)
 
                 await db.set_chat_synced(db_chat.id)
                 await self._notify(
                     user.tg_group_id,
-                    f"Чат {db_chat.max_chat_title}: "
+                    f"Чат <b>{db_chat.max_chat_title}</b>: "
                     f"новых {new_count}, дубликатов {dup_count}, "
-                    f"отправлено в TG {sent_count}.",
+                    f"отправлено {sent_count} (из них с медиа {media_count}).",
                 )
                 await asyncio.sleep(1)
 
@@ -222,7 +234,7 @@ class SyncWorker:
         except Exception as e:
             log.error("Full history sync error for user %s: %s",
                       user.tg_user_id, e, exc_info=True)
-            
+
     async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
         if not db_chat.tg_topic_id:
             return
@@ -249,33 +261,57 @@ class SyncWorker:
         await db.set_chat_synced(db_chat.id)
 
     async def _forward_msg_to_tg(self, user, client, db_chat: Chat, msg):
-        from telegram.sender import format_history_message, send_media_to_telegram_topic
+        """Отправка одного сообщения с медиа (используется из _sync_chat)."""
+        from telegram.sender import (
+            format_history_message,
+            send_media_to_telegram_topic,
+            send_text_to_topic,
+        )
+        from bridge.max_client import _detect_media
 
         text        = getattr(msg, "text", "") or ""
         msg_id      = str(getattr(msg, "id", "") or "")
         timestamp   = getattr(msg, "time", _now_ms())
         sender      = getattr(msg, "sender", None)
         sender_name = await client.get_client(sender) if sender else ""
+        has_media, media_type = _detect_media(msg)
 
-        caption = format_history_message(
+        formatted = format_history_message(
             sender_name = sender_name,
             text        = text,
             timestamp   = timestamp,
+            has_media   = False,   # медиа отправим реальное, не плейсхолдер
+            media_type  = media_type,
         )
 
-        sent_msg = await send_media_to_telegram_topic(
-            bot      = self.bot,
-            group_id = user.tg_group_id,
-            topic_id = db_chat.tg_topic_id,
-            text     = caption,
-            client   = client,
-            msg      = msg,
-            caption  = text[:1024] if text else "",
-        )
+        if has_media:
+            sent_msg = await send_media_to_telegram_topic(
+                bot      = self.bot,
+                group_id = user.tg_group_id,
+                topic_id = db_chat.tg_topic_id,
+                text     = formatted,
+                client   = client,
+                msg      = msg,
+                caption  = text[:1024] if text else "",
+            )
+        else:
+            sent_msg = await send_text_to_topic(
+                bot      = self.bot,
+                group_id = user.tg_group_id,
+                topic_id = db_chat.tg_topic_id,
+                text     = formatted,
+            )
 
         if sent_msg:
-            await db.update_tg_msg_id_by_max(
-                user.id, db_chat.id, msg_id, sent_msg.message_id,
+            msg_db_id = await db.save_message(
+                user_id    = user.id,
+                chat_id    = db_chat.id,
+                direction  = "max_to_tg",
+                timestamp  = timestamp,
+                max_sender_id = sender,
+                max_msg_id = msg_id,
+                tg_msg_id  = sent_msg.message_id,
+                has_media  = has_media,
             )
 
     async def _create_topic(self, group_id: int, name: str) -> int | None:
@@ -305,7 +341,7 @@ class SyncWorker:
                             chat_id = group_id,
                             message_thread_id = tg_topic_id,
                             name    = name[:128],
-                            )#icon_custom_emoji_id 
+                            )#icon_custom_emoji_id
                 return True
             except TelegramRetryAfter as e:
                 wait = e.retry_after + 1
@@ -313,8 +349,7 @@ class SyncWorker:
                             wait, attempt + 1)
                 await asyncio.sleep(wait)
             except TelegramBadRequest as e:
-                # Тут можно логировать e.description для точной диагностики
-                description = getattr(e, "description",    None) or getattr(e, "message", "?")
+                description = getattr(e, "description", None) or getattr(e, "message", "?")
                 if 'TOPIC_ID_INVALID' in description:
                     log.warning("test_exist_forum_topic Топик не найден, возможно удалён: %s", e)
                     await asyncio.sleep(2)
@@ -334,7 +369,7 @@ class SyncWorker:
     async def _notify(self, group_id: int, text: str):
         for attempt in range(3):
             try:
-                await self.bot.send_message(chat_id=group_id, text=text, parse_mode = "HTML",)
+                await self.bot.send_message(chat_id=group_id, text=text, parse_mode="HTML")
                 return
             except TelegramRetryAfter as e:
                 wait = e.retry_after + 1
@@ -363,30 +398,27 @@ async def _chat_title(chat, client) -> str:
             ctitle = 'MAX service Chat'
             return ctitle
         else:
-            max_bot_id = next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))
-            # ctitle = f"MAX Bot: {next(user_id for user_id in getattr(chat, 'participants',    '?') if user_id != getattr(chat, 'owner',    '?'))}" 
+            max_bot_id = next(user_id for user_id in getattr(chat, 'participants', '?') if user_id != getattr(chat, 'owner', '?'))
             max_bot_name = await client._client.get_user(max_bot_id)
-            max_bot_firstname = getattr(max_bot_name.names[0], 'first_name',    '?') if max_bot_name else 'max_bot_id'
+            max_bot_firstname = getattr(max_bot_name.names[0], 'first_name', '?') if max_bot_name else 'max_bot_id'
             ctitle = f"MAX Bot: {max_bot_firstname}"
             return " ".join(str(ctitle).split())
-    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) == 0:
+    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id", None) == 0:
         ctitle = 'MAX Избранное'
         return ctitle
 
-    
+
     # Групповые чаты — title или name
     for attr in ("title", "name"):
         val = getattr(chat, attr, None)
         if val:
             return str(val)
 
-    # Личные диалоги — participants   
-    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id",    None) != 0:
-        # Пропускаем себя если есть me_id
-        participant = next(user_id for user_id in getattr(chat, 'participants',    None) if user_id != getattr(chat, 'owner',    '?'))
+    # Личные диалоги — participants
+    if getattr(chat, "type", "?") == 'DIALOG' and not getattr(chat, 'has_bots', False) and getattr(chat, "id", None) != 0:
+        participant = next(user_id for user_id in getattr(chat, 'participants', None) if user_id != getattr(chat, 'owner', '?'))
         if participant:
-            try: 
-                #user = await client._client.fetch_users([participant])
+            try:
                 user = await client._client.get_user(participant)
                 names = getattr(user, "names", None)
                 if names:
