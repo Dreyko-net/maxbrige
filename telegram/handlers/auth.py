@@ -9,8 +9,8 @@ import asyncio
 import logging
 
 from aiogram import Router, F, Bot
-from aiogram.filters import CommandStart,Command
-from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, ADMINISTRATOR
+from aiogram.filters import CommandStart, Command
+from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -23,7 +23,6 @@ from bridge.max_client import session_path_for
 from database import db
 from telegram.sms_provider import TelegramSmsCodeProvider
 from telegram.password_provider import TelegramPasswordProvider
-from bridge.sync_worker import SyncWorker
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -46,6 +45,19 @@ class AuthStates(StatesGroup):
 
 
 # ── Клавиатуры ────────────────────────────────────────────────────────────────
+
+def _connected_menu_kb() -> InlineKeyboardMarkup:
+    """Клавиатура после успешного подключения."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Синхронизировать чаты", callback_data="cmd:sync_chats"),
+        ],
+        [
+            InlineKeyboardButton(text="📥 Полная синхронизация", callback_data="cmd:full_sync"),
+        ],
+    ])
+
+
 def init_connect_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Начать подключение к Max", callback_data="max_connect"),
@@ -64,6 +76,7 @@ def bot_setting_group_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Разрешаю перенастроить группу для корректной работы.", callback_data="group_setting"),
     ]])
+
 def step1_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
@@ -99,6 +112,17 @@ STEP1_TEXT = (
     "Нажмите кнопку когда группа готова."
 )
 
+AFTER_GROUP_TEXT = (
+    "✅ <b>Подключение завершено!</b>\n\n"
+    "Доступные команды (в личных сообщениях боту):\n"
+    "• <code>/status</code> — статус подключения к MAX\n"
+    "• <code>/sync_chats</code> — синхронизировать список чатов (без истории)\n"
+    "• <code>/sync</code> — полная синхронизация (чаты + история)\n\n"
+    "Команды внутри топика (темы) в группе:\n"
+    "• <code>/history</code> — скачать историю только этого чата\n\n"
+    "Выберите действие:"
+)
+
 
 async def send_step1(bot: Bot, chat_id: int):
     await bot.send_message(chat_id, STEP1_TEXT, parse_mode="HTML",
@@ -132,10 +156,18 @@ async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
                 )
                 await state.set_state(AuthStates.WAIT_GROUP)
             else:
-                log.info("[/start] вызван в группе. Настройки корректны.")
-                await start_sync_msg(msg, bot)
+                log.info("[/start] вызван в группе. Настройки корректны, группа подключена.")
+                await msg.answer(
+                    "✅ Группа настроена корректно.\n\n"
+                    "Команды управления (в личных сообщениях боту):\n"
+                    "• <code>/sync_chats</code> — синхронизировать список чатов\n"
+                    "• <code>/sync</code> — полная синхронизация\n\n"
+                    "Внутри топика:\n"
+                    "• <code>/history</code> — скачать историю этого чата",
+                    parse_mode="HTML",
+                )
     if msg.chat.type == 'private':
-        user_id = msg.from_user.id  
+        user_id = msg.from_user.id
         log.info("[/start] fresh auth flow")
         await msg.answer(
             "👋 Добро пожаловать в <b>MAX Bridge</b>!\n\n"
@@ -156,10 +188,9 @@ async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
 async def cb_max_connect(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    me = await bot.get_me()
     user_id = callback.from_user.id
     log.info("[max_connect] user_id=%s", user_id)
-    
+
     # Если уже идёт авторизация — предлагаем отменить
     if user_id in auth_tasks and not auth_tasks[user_id].done():
         await callback.answer(
@@ -192,17 +223,15 @@ async def cb_max_connect(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await callback.answer("🔄 Переподключаюсь к MAX…")
         asyncio.create_task(_reconnect(user_id, user.max_phone, bot, callback.message.chat.id, state))
         return
-    # await msg.answer(
-    #     "Введите ваш номер телефона, зарегистрированный в MAX\n"
-    #     "(формат: <code>+79001234567</code>):",
-    #     parse_mode="HTML",
-    # )
+
     await callback.message.answer(
        "Введите ваш номер телефона, зарегистрированный в MAX\n"
         "(формат: <code>+79001234567</code>):",
         parse_mode="HTML",
     )
     await state.set_state(AuthStates.WAIT_PHONE)
+
+
 # ── Телефон ───────────────────────────────────────────────────────────────────
 
 @router.message(AuthStates.WAIT_PHONE)
@@ -260,13 +289,14 @@ async def handle_sms_code(msg: Message, state: FSMContext):
     provider.set_code(code)
     await msg.answer("🔐 Проверяю код…")
     await state.set_state(AuthStates.WAIT_2FA)
-    
+
+
 # ── 2FA-код ───────────────────────────────────────────────────────────────────
 
 @router.message(AuthStates.WAIT_2FA)
 async def handle_2FA_code(msg: Message, state: FSMContext):
     code = msg.text.strip() if msg.text else ""
-    
+
     tg_user_id = msg.from_user.id
     log.info("[auth] 2fa code entered user=%s", tg_user_id)
     provider_2fa = pending_2fa_auth.get(tg_user_id)
@@ -276,7 +306,7 @@ async def handle_2FA_code(msg: Message, state: FSMContext):
         return
 
     provider_2fa.set_password(code)
-    await msg.answer("🔐 Проверяю 2FA код…")    
+    await msg.answer("🔐 Проверяю 2FA код…")
 
 
 # ── Отмена авторизации ────────────────────────────────────────────────────────
@@ -286,7 +316,6 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tg_user_id = callback.from_user.id
 
-    # Отменяем задачу авторизации
     task = auth_tasks.pop(tg_user_id, None)
     if task and not task.done():
         task.cancel()
@@ -295,11 +324,10 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
         except asyncio.CancelledError:
             pass
 
-    # Отменяем провайдер SMS
     provider = pending_auth.pop(tg_user_id, None)
     if provider:
         provider.cancelled = True
-        provider._event.set()  # разблокируем ожидание если зависло
+        provider._event.set()
 
     await state.clear()
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -323,18 +351,18 @@ async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot)
         "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
         "Нажмите кнопку ниже — Telegram предложит выбрать вашу группу "
         "и автоматически назначит бота администратором с нужными правами.\n\n"
-        "После добавления бот <b>автоматически</b> начнёт синхронизацию.",
+        "После добавления бот <b>НЕ запускает</b> синхронизацию автоматически.\n"
+        "Вы сможете запустить её вручную командой /sync или /sync_chats",
         parse_mode="HTML",
         reply_markup=step2_kb(me.username),
     )
     await state.set_state(AuthStates.WAIT_GROUP)
 
 
-async def start_sync_msg(msg: Message, bot: Bot):
-    group_id = msg.chat.id
-    tg_user_id = msg.from_user.id
-    log.info("[group] bot added as admin to group=%s by user=%s", group_id, tg_user_id)
+# ── Регистрация группы (из /start в группе или callback) ─────────────────────
 
+async def register_group(bot: Bot, group_id: int, tg_user_id: int):
+    """Общая логика регистрации группы — без запуска синхронизации."""
     user = await db.get_user(tg_user_id)
     if not user or user.status != "active":
         log.info("[group] user not found or not active, skipping")
@@ -344,89 +372,44 @@ async def start_sync_msg(msg: Message, bot: Bot):
         log.info("[group] user already has different group, skipping")
         return
 
-    # Сохраняем group_id
     await db.set_user_group(tg_user_id, group_id)
-    user = await db.get_user(tg_user_id)
+
+    # Подсказка — что делать дальше
+    await bot.send_message(
+        tg_user_id,
+        AFTER_GROUP_TEXT,
+        parse_mode="HTML",
+        reply_markup=_connected_menu_kb(),
+    )
 
     await bot.send_message(
         group_id,
-        f"🔄 Начинаю синхронизацию чатов MAX…\n\n"
-        f"Прогресс буду отправлять постепенно.",
+        f"✅ Группа подключена! {AFTER_GROUP_TEXT}",
         parse_mode="HTML",
     )
 
-    client = manager.get_client(tg_user_id)
-    log.info("[group] client_in_pool=%s for user=%s", client is not None, tg_user_id)
-    if client:
-        sync = SyncWorker(bot=bot, manager=manager)
-        asyncio.create_task(sync.full_sync(user=user, client=client))
-        # await db.set_max_user_id(tg_user_id, max_user_id)
-    else:
-        await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Напишите /sync после перезапуска бота.")
 
-# ── Добавление бота в группу (my_chat_member) ─────────────────────────────────
-# Это событие приходит когда бота добавляют в группу или назначают админом.
-# Именно здесь мы узнаём ID группы — без пересылки сообщений.
+# ── /start в группе (админ) ──────────────────────────────────────────────────
 
-# @router.my_chat_member(
-#     ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> ADMINISTRATOR)
-# )
+# Заменяем старую start_sync_msg на register_group
 @router.callback_query(F.data == "bot_added_group")
-async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
-    """Бот добавлен в группу с правами администратора."""
-    group = event.message.chat
-    if group.type not in ("supergroup", "group"):
-        return
+async def bot_added_as_admin(callback: CallbackQuery, bot: Bot):
+    """Пользователь нажал 'Бот уже добавлен в группу'."""
+    await callback.answer()
+    tg_user_id = callback.from_user.id
 
-    group_id = group.id
-    tg_user_id = event.from_user.id
-    log.info("[group] bot added as admin to group=%s by user=%s", group_id, tg_user_id)
-
-    user = await db.get_user(tg_user_id)
-    if not user or user.status != "active":
-        log.info("[group] user not found or not active, skipping")
-        return
-
-    if user.tg_group_id and user.tg_group_id != group_id:
-        log.info("[group] user already has different group, skipping")
-        return
-
-    # Проверяем Topics
-    try:
-        chat_info = await bot.get_chat(group_id)
-        if not getattr(chat_info, "is_forum", False):
-            await bot.send_message(
-                tg_user_id,
-                f"⚠️ Бот добавлен в группу <b>{group.title}</b>, "
-                f"но <b>Темы (Topics)</b> не включены.\n\n"
-                f"Включите: Настройки группы → Темы → Включить\n"
-                f"Затем удалите бота из группы и добавьте снова.",
-                parse_mode="HTML",
-            )
-            return
-    except Exception as e:
-        log.error("[group] get_chat error: %s", e)
-
-    # Сохраняем group_id
-    await db.set_user_group(tg_user_id, group_id)
-    user = await db.get_user(tg_user_id)
-
+    # Пытаемся определить group_id из состояния или сообщения
+    # Для этого случая пользователь нажал кнопку в личке — group_id ещё не известен
+    # Направляем к пересылке сообщения из группы
     await bot.send_message(
         tg_user_id,
-        f"✅ Группа <b>{group.title}</b> подключена!\n"
-        f"🔄 Начинаю синхронизацию чатов MAX…\n\n"
-        f"Прогресс буду отправлять в группу.",
+        "📎 Перешлите <b>любое сообщение</b> из вашей группы-зеркала сюда,\n"
+        "чтобы я мог определить ID группы.",
         parse_mode="HTML",
     )
 
-    client = manager.get_client(tg_user_id)
-    log.info("[group] client_in_pool=%s for user=%s", client is not None, tg_user_id)
-    if client:
-        sync = SyncWorker(bot=bot, manager=manager)
-        asyncio.create_task(sync.full_sync(user=user, client=client))
-    else:
-        await bot.send_message(tg_user_id, "⚠️ Клиент MAX не найден. Напишите /sync после перезапуска бота.")
 
+# ── my_chat_member события ─────────────────────────────────────────────────
 
 @router.my_chat_member(
     ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> IS_MEMBER)
@@ -453,7 +436,8 @@ async def run_auth(tg_user_id, phone, provider, provider_2fa, bot, chat_id, stat
     log.info("[auth] run_auth started user=%s", tg_user_id)
     try:
         client = await manager.connect_user(
-            tg_user_id=tg_user_id, max_phone=phone, sms_code_provider=provider, password_provider = provider_2fa)
+            tg_user_id=tg_user_id, max_phone=phone,
+            sms_code_provider=provider, password_provider=provider_2fa)
         log.info("[auth] connect_user done user=%s me=%s", tg_user_id, client.me)
 
         pending_auth.pop(tg_user_id, None)
@@ -507,80 +491,3 @@ async def _reconnect(tg_user_id, phone, bot, chat_id, state):
             f"❌ Ошибка переподключения: <code>{e}</code>",
             parse_mode="HTML",
         )
-
-
-# ── Ручной запуск синхронизации ───────────────────────────────────────────────
-
-from aiogram.filters import Command
-
-@router.message(Command("sync"))
-async def cmd_sync(msg: Message, bot: Bot):
-    """Принудительно запускает синхронизацию чатов MAX."""
-    tg_user_id = msg.from_user.id
-    user = await db.get_user(tg_user_id)
-    if not user or user.status != "active":
-        await msg.answer("❌ Сначала авторизуйтесь: /start")
-        return
-    if not user.tg_group_id:
-        await msg.answer("❌ Группа не подключена. Пройдите /start")
-        return
-    client = manager.get_client(tg_user_id)
-    if not client:
-        await msg.answer("❌ Клиент MAX не найден. Перезапустите: /start")
-        return
-
-    await msg.answer("🔄 Запускаю синхронизацию…")
-    sync = SyncWorker(bot=bot, manager=manager)
-    asyncio.create_task(sync.full_sync(user=user, client=client))
-
-
-@router.message(Command("debug_chats"))
-async def cmd_debug_chats(msg: Message):
-    """Отладка: показывает что возвращает fetch_chats."""
-    tg_user_id = msg.from_user.id
-    client = manager.get_client(tg_user_id)
-    if not client:
-        await msg.answer("❌ Клиент не найден")
-        return
-
-    await msg.answer("🔍 Запрашиваю чаты из MAX…")
-    try:
-        raw = await client._client.fetch_chats()
-        if not raw:
-            await msg.answer("⚠️ fetch_chats() вернул пустой список")
-            return
-        lines = [f"Всего чатов: {len(raw)}"]
-        for c in raw[:10]:
-            cid    = getattr(c, "id",    None) or getattr(c, "chat_id", "?")
-            ctitle = getattr(c, "title", None) or getattr(c, "owner",    "?")
-            cicon = getattr(c, "base_icon_url", None) or getattr(c, "base_raw_icon_url",    "?")
-            ctype  = getattr(c, "type", "?")
-            if getattr(c, 'has_bots', False):
-                if (getattr(c, 'options', None) or {}).get('SERVICE_CHAT', False):
-                    ctitle = 'MAX service Chat'
-                else:
-                    ctitle = f"MAX Bot: {next(user_id for user_id in getattr(c, 'participants',    '?') if user_id != getattr(c, 'owner',    '?'))}" 
-            if ctype == 'DIALOG' and not getattr(c, 'has_bots', False) and getattr(c, "id",    None) == 0:
-                ctitle = 'MAX Избранное'
-            if ctype == 'DIALOG' and not getattr(c, 'has_bots', False) and getattr(c, "id",    None) != 0:
-                    participant_id = next(user_id for user_id in getattr(c, "participants",    "?") if user_id != getattr(c, "owner",    "?"))
-                    user = await client._client.fetch_users([participant_id])
-                    if user:
-                        ctitle = f"{getattr(user[0].names[0], 'first_name', '')} {getattr(user[0].names[0], 'last_name', '')}"
-            #ctype  = type(c).__name__
-            lines.append(f"• [{ctype}] id={cid} title={ctitle} icon={cicon}")
-        await msg.answer("\n".join(lines))
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка: <code>{e}</code>", parse_mode="HTML")
-
-
-
-# @router.message(Command("test"))
-# async def cmd_test(msg: Message, bot: Bot):
-#     """Тестовыая команда"""
-#     max_user_id = 115482936
-#     test = await client.get_client(marker = max_user_id)
-#     # test = await max_username_title(max_user_id, manager)
-#     print(test)
-#     tg_user_id = msg.from_user.id
-#     user = await db.get_user(tg_user_id)

@@ -192,11 +192,19 @@ def extract_attachment(msg) -> dict | None:
 
 # ── Скачивание медиа из MAX ───────────────────────────────────────────────
 
-async def download_from_max(client: "MaxUserClient", msg, attach_info: dict) -> bytes | None:
-    """Скачивает медиа из MAX. Возвращает байты или None."""
+async def download_from_max(client: "MaxUserClient", msg, attach_info: dict,
+                          max_chat_id: str | None = None) -> bytes | None:
+    """Скачивает медиа из MAX. Возвращает байты или None.
+
+    Args:
+        max_chat_id: ID чата MAX (строка). Если не передан — берётся из msg.chat_id.
+                      Обязателен для video и document, т.к. msg.chat_id может быть 0.
+    """
     atype = attach_info["type"]
     url = attach_info.get("url")
-
+    # Явно переданный chat_id приоритетнее (msg.chat_id может быть 0)
+    chat_id = int(max_chat_id) if max_chat_id else (getattr(msg, "chat_id", 0) or 0)
+    msg_id = getattr(msg, "id", 0)
     # Прямой URL (photo, audio, sticker)
     if url:
         return await _download_url(url, timeout=60)
@@ -204,15 +212,13 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict) -> 
     # Видео — нужен VideoRequest
     if atype == "video":
         video_id = attach_info.get("video_id", 0)
-        chat_id = getattr(msg, "chat_id", 0) or 0
-        msg_id = getattr(msg, "id", 0)
         if not video_id or not chat_id:
             log.warning("Video: missing video_id or chat_id (video=%s, chat=%s, msg=%s)",
-                        video_id, chat_id, msg_id)
+                        video_id, chat_id, msg_id, max_chat_id)
             return None
         try:
             req = await client._client.get_video_by_id(
-                chat_id=int(chat_id),
+                chat_id=chat_id,
                 message_id=int(msg_id) if msg_id else 0,
                 video_id=int(video_id),
             )
@@ -228,15 +234,13 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict) -> 
     # Файл — нужен FileRequest
     if atype == "document":
         file_id = attach_info.get("file_id", 0)
-        chat_id = getattr(msg, "chat_id", 0) or 0
-        msg_id = getattr(msg, "id", 0)
         if not file_id or not chat_id:
             log.warning("File: missing file_id or chat_id (file=%s, chat=%s, msg=%s)",
-                        file_id, chat_id, msg_id)
+                        file_id, chat_id, msg_id, max_chat_id)
             return None
         try:
             req = await client._client.get_file_by_id(
-                chat_id=int(chat_id),
+                chat_id=chat_id,
                 message_id=int(msg_id) if msg_id else 0,
                 file_id=int(file_id),
             )
@@ -283,11 +287,13 @@ async def send_media_to_telegram_topic(
     client:   "MaxUserClient",
     msg,
     caption: str = "",
+    max_chat_id:  str | None = None,
 ) -> TgMessage | None:
     """Отправляет сообщение в тему с реальным медиа-контентом.
 
-    Если у сообщения есть вложение — скачивает из MAX и отправляет
-    как photo/video/voice/audio/document. Иначе — как текст.
+    Args:
+        max_chat_id: ID чата MAX. Обязателен для видео и документов,
+                     т.к. msg.chat_id может быть 0 в истории.
     """
     attach_info = extract_attachment(msg)
 
@@ -309,7 +315,7 @@ async def send_media_to_telegram_topic(
                                         _format_call(attach_info["attach"]))
 
     # Скачиваем медиа
-    data = await download_from_max(client, msg, attach_info)
+    data = await download_from_max(client, msg, attach_info, max_chat_id=max_chat_id)
     if not data:
         log.warning("Failed to download %s (msg=%s), sending as text fallback",
                     atype, getattr(msg, "id", "?"))

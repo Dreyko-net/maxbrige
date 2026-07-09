@@ -198,6 +198,7 @@ class SyncWorker:
                                 client   = client,
                                 msg      = msg,
                                 caption  = text[:1024] if text else "",
+                                max_chat_id = db_chat.max_chat_id,
                             )
                             media_count += 1
                         else:
@@ -293,6 +294,7 @@ class SyncWorker:
                 client   = client,
                 msg      = msg,
                 caption  = text[:1024] if text else "",
+                max_chat_id = db_chat.max_chat_id,
             )
         else:
             sent_msg = await send_text_to_topic(

@@ -13,29 +13,28 @@ from aiogram.types import Message, ContentType
 
 from bridge.manager import manager
 from bridge.queue import BridgeEvent, tg_to_max_queue
-from bridge.sync_worker import SyncWorker
 from database import db
-from telegram.handlers.auth import AuthStates
+from telegram.handlers.auth import AuthStates, register_group
 
 log = logging.getLogger(__name__)
 router = Router()
 
 
-# ── Регистрация группы (пересланное сообщение) ────────────────────────────────
+# ── Регистрация группы (пересланное сообщение) ───────────────────────────────
 
-@router.message(AuthStates.CONNECTED, F.forward_origin )
-@router.message(F.forward_origin )
+@router.message(AuthStates.CONNECTED, F.forward_origin)
+@router.message(F.forward_origin)
 async def handle_forwarded_group(msg: Message, bot: Bot):
     """
     Пользователь переслал сообщение из группы.
-    Регистрируем group_id и запускаем синхронизацию.
+    Регистрируем group_id — БЕЗ запуска синхронизации.
     """
     tg_user_id = msg.from_user.id
     user = await db.get_user(tg_user_id)
     if not user:
         return
 
-    group = msg.forward_origin 
+    group = msg.forward_origin
     if not group or group.type not in ("supergroup", "group"):
         log.info("[DEBUG] Данные группы=%s", group)
         log.info("[DEBUG] Данные типа группы=%s", group.type)
@@ -59,18 +58,14 @@ async def handle_forwarded_group(msg: Message, bot: Bot):
         await msg.answer(f"❌ Не могу получить доступ к группе: {e}")
         return
 
-    await db.set_user_group(tg_user_id, group_id)
-    user = await db.get_user(tg_user_id)
-
-    await msg.answer("✅ Группа зарегистрирована! Начинаю синхронизацию…")
-
-    client = manager.get_client(tg_user_id)
-    if client:
-        sync = SyncWorker(bot=bot, manager=manager)
-        import asyncio
-        asyncio.create_task(sync.full_sync(user=user, client=client))
-    else:
-        await msg.answer("⚠️ Клиент MAX не найден. Попробуйте /start")
+    await register_group(bot, group_id, tg_user_id)
+    await msg.answer("✅ Группа зарегистрирована!")
+    await msg.answer(
+        "Теперь запустите синхронизацию:\n"
+        "• <code>/sync_chats</code> — только список чатов\n"
+        "• <code>/sync</code> — полная синхронизация с историей",
+        parse_mode="HTML",
+    )
 
 
 # ── Текстовые сообщения из темы → MAX ────────────────────────────────────────
