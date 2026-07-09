@@ -249,52 +249,34 @@ class SyncWorker:
         await db.set_chat_synced(db_chat.id)
 
     async def _forward_msg_to_tg(self, user, client, db_chat: Chat, msg):
-        from telegram.sender import format_history_message, send_to_telegram_topic
-        from bridge.max_client import _detect_media
+        from telegram.sender import format_history_message, send_media_to_telegram_topic
 
-        text        = getattr(msg, "text",      "") or ""
-        msg_id      = str(getattr(msg, "id",    "") or "")
+        text        = getattr(msg, "text", "") or ""
+        msg_id      = str(getattr(msg, "id", "") or "")
         timestamp   = getattr(msg, "time", _now_ms())
-        sender      = getattr(msg, "sender",    None)
+        sender      = getattr(msg, "sender", None)
         sender_name = await client.get_client(sender) if sender else ""
-        has_media, media_type = _detect_media(msg)
 
-        formatted = format_history_message(
+        caption = format_history_message(
             sender_name = sender_name,
             text        = text,
             timestamp   = timestamp,
-            has_media   = has_media,
-            media_type  = media_type,
         )
 
-        sent_msg = await send_to_telegram_topic(
+        sent_msg = await send_media_to_telegram_topic(
             bot      = self.bot,
             group_id = user.tg_group_id,
             topic_id = db_chat.tg_topic_id,
-            text     = formatted,
+            text     = caption,
+            client   = client,
+            msg      = msg,
+            caption  = text[:1024] if text else "",
         )
 
         if sent_msg:
-            msg_db_id = await db.save_message(
-                user_id    = user.id,
-                chat_id    = db_chat.id,
-                direction  = "max_to_tg",
-                timestamp  = timestamp,
-                max_sender_id = sender,
-                max_msg_id = msg_id,
-                tg_msg_id  = sent_msg.message_id,
-                has_media  = has_media,
+            await db.update_tg_msg_id_by_max(
+                user.id, db_chat.id, msg_id, sent_msg.message_id,
             )
-            if has_media and msg_db_id:
-                from telegram.keyboards import media_download_kb
-                try:
-                    await self.bot.edit_message_reply_markup(
-                        chat_id      = user.tg_group_id,
-                        message_id   = sent_msg.message_id,
-                        reply_markup = media_download_kb(msg_db_id, msg_id),
-                    )
-                except Exception:
-                    pass
 
     async def _create_topic(self, group_id: int, name: str) -> int | None:
         for attempt in range(5):
@@ -335,11 +317,11 @@ class SyncWorker:
                 description = getattr(e, "description",    None) or getattr(e, "message", "?")
                 if 'TOPIC_ID_INVALID' in description:
                     log.warning("test_exist_forum_topic Топик не найден, возможно удалён: %s", e)
-                    await asyncio.sleep(0,5)
+                    await asyncio.sleep(2)
                     return False
                 if 'TOPIC_NOT_MODIFIED' in description:
                     log.warning("test_exist_forum_topic Топик найден, изменения не требуются: %s", e)
-                    await asyncio.sleep(0,5)
+                    await asyncio.sleep(2)
                     return True
                 log.error("test_exist_forum_topic error: %s", e)
                 return False
