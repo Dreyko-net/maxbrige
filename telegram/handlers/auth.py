@@ -21,6 +21,7 @@ from aiogram.types import (
 from bridge.manager import manager
 from bridge.max_client import session_path_for
 from database import db
+from telegram.sender import _send_with_retry
 from telegram.sms_provider import TelegramSmsCodeProvider
 from telegram.password_provider import TelegramPasswordProvider
 
@@ -135,8 +136,8 @@ async def send_step1(bot: Bot, chat_id: int):
 async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
     if msg.chat.type in ("supergroup", "group"):
         log.info("[/start] вызван в группе. Проверяем настройки группы")
-        me = await bot.get_me()
-        member = await bot.get_chat_member(msg.chat.id, bot.id)
+        me = await _send_with_retry(bot.get_me())
+        member = await _send_with_retry(msg.chat.id, bot.id)
         if member.status == 'member':
             await msg.answer(
             "Группа найдена. Необходимо Бота добавить в Администраторы группы с правом изменять группу (для перенастройки в Форум).\n",
@@ -345,7 +346,7 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
 async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    me = await bot.get_me()
+    me = await _send_with_retry(bot.get_me())
     await callback.message.answer(
         "✅ Отлично!\n\n"
         "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
