@@ -156,16 +156,18 @@ async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
                 )
                 await state.set_state(AuthStates.WAIT_GROUP)
             else:
-                log.info("[/start] вызван в группе. Настройки корректны, группа подключена.")
-                await msg.answer(
-                    "✅ Группа настроена корректно.\n\n"
-                    "Команды управления (в личных сообщениях боту):\n"
-                    "• <code>/sync_chats</code> — синхронизировать список чатов\n"
-                    "• <code>/sync</code> — полная синхронизация\n\n"
-                    "Внутри топика:\n"
-                    "• <code>/history</code> — скачать историю этого чата",
-                    parse_mode="HTML",
-                )
+                log.info("[/start] вызван в группе. Настройки корректны, регистрируем группу.")
+                tg_user_id = msg.from_user.id
+                user = await db.get_user(tg_user_id)
+                if not user or user.status != "active":
+                    await msg.answer(
+                        "⚠️ Вы ещё не авторизованы в MAX.\n\n"
+                        "Сначала напишите боту в <b>личные сообщения</b> команду /start\n"
+                        "и пройдите авторизацию.",
+                        parse_mode="HTML",
+                    )
+                    return
+                await register_group(bot, msg.chat.id, tg_user_id)
     if msg.chat.type == 'private':
         user_id = msg.from_user.id
         log.info("[/start] fresh auth flow")
@@ -414,11 +416,31 @@ async def bot_added_as_admin(callback: CallbackQuery, bot: Bot):
     ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> IS_MEMBER)
 )
 async def bot_added_as_member(event: ChatMemberUpdated, bot: Bot):
-    """Бот добавлен как обычный участник (без прав админа)."""
+    """Бот добавлен в группу. Если как админ — регистрируем, если как участник — просим дать права."""
     group = event.chat
     if group.type not in ("supergroup", "group"):
         return
     tg_user_id = event.from_user.id
+    new_status = event.new_chat_member.status
+
+    if new_status == "administrator":
+        # Бот добавлен с правами администратора — пробуем зарегистрировать группу
+        log.info("[my_chat_member] бот добавлен как администратор в группу %s", group.id)
+        user = await db.get_user(tg_user_id)
+        if user and user.status == "active":
+            await register_group(bot, group.id, tg_user_id)
+        else:
+            await bot.send_message(
+                tg_user_id,
+                f"✅ Бот добавлен как администратор в <b>{group.title}</b>.\n\n"
+                f"Но вы ещё не авторизованы в MAX.\n"
+                f"Напишите боту в личные сообщения: /start\n"
+                f"Затем сделайте /start в этой группе для подключения.",
+                parse_mode="HTML",
+            )
+        return
+
+    # Бот добавлен без прав администратора
     await bot.send_message(
         tg_user_id,
         f"⚠️ Бот добавлен в группу <b>{group.title}</b> без прав администратора.\n\n"
