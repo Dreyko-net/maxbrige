@@ -1,3 +1,2 @@
-from . import auth, messages, callbacks
-
-__all__ = ["auth", "messages", "callbacks"]
+from . import auth, messages, callbacks, commands
+__all__ = ["auth", "messages", "callbacks", "commands"]

@@ -145,7 +145,7 @@ async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
             )
             await state.set_state(AuthStates.WAIT_GROUP)
         if member.status == 'administrator':
-            if msg.chat.is_forum == None:
+            if msg.chat.is_forum is None:
                 log.info("[/start] вызван в группе. Права Администратора есть, но группа не Форум")
                 await msg.answer(
                 f"⚠️ Бот добавлен в группу <b>{msg.chat.title}</b> и является Администраторм, "
