@@ -346,7 +346,7 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
 async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    me = await _send_with_retry(bot.get_me())
+    me = await bot.get_me()
     await callback.message.answer(
         "✅ Отлично!\n\n"
         "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
