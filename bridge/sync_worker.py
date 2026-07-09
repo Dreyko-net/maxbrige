@@ -352,7 +352,7 @@ class SyncWorker:
     async def _notify(self, group_id: int, text: str):
         for attempt in range(3):
             try:
-                await self.bot.send_message(chat_id=group_id, text=text)
+                await self.bot.send_message(chat_id=group_id, text=text, parse_mode = "HTML",)
                 return
             except TelegramRetryAfter as e:
                 wait = e.retry_after + 1

@@ -5,7 +5,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import TelegramObject
 
-from config import TG_PROXY
+from config import TG_PROXY, DEBUG
 from telegram.handlers import auth, messages, callbacks
 
 log = logging.getLogger(__name__)
@@ -23,12 +23,13 @@ def create_bot(token: str) -> tuple[Bot, Dispatcher]:
     proxy = TG_PROXY.rstrip("/") if TG_PROXY != '' else ""
 
     if proxy:
-        # log.info("Using Telegram API proxy: %s", proxy)
         server = TelegramAPIServer.from_base(proxy)
-        # log.info("API URL template: %s", server.base)
-        # Проверяем что URL корректный
-        # test_url = server.base.format(token=token, method="getMe")
-        # log.info("Test getMe URL: %s", test_url)
+        if DEBUG:
+            # Проверяем что URL корректный
+            log.info("Using Telegram API proxy: %s", proxy)
+            log.info("API URL template: %s", server.base)
+            test_url = server.base.format(token=token, method="getMe")
+            log.info("Test getMe URL: %s", test_url)
         session = AiohttpSession(api=server)
         bot = Bot(token=token, session=session)
     else:
