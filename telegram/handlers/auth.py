@@ -17,6 +17,7 @@ from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ChatMemberUpdated,
 )
+from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 
 from bridge.manager import manager
 from bridge.max_client import session_path_for
@@ -346,7 +347,19 @@ async def cb_cancel_auth(callback: CallbackQuery, state: FSMContext):
 async def cb_group_created(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    me = await bot.get_me()
+    for attempt in range(5):
+        try:
+            me = await bot.get_me()
+            return True
+        except TelegramRetryAfter as e:
+            wait = attempt + 1
+            await asyncio.sleep(wait)
+        except TelegramNetworkError as e:
+            wait = 2 ** attempt + 1
+            await asyncio.sleep(wait)
+        except Exception as e:
+            log.error("get_me: error: %s", e)
+            return None
     await callback.message.answer(
         "✅ Отлично!\n\n"
         "🏗 <b>Шаг 2 из 2 — добавьте бота в группу</b>\n\n"
