@@ -79,20 +79,10 @@ def bot_setting_group_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Разрешаю перенастроить группу для корректной работы.", callback_data="group_setting"),
     ]])
 
-# def step1_kb() -> InlineKeyboardMarkup:
-#     return InlineKeyboardMarkup(inline_keyboard=[[
-#         InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
-#     ]])
-
-def step1_kb(bot_username: str) -> InlineKeyboardMarkup:
-    add_url = (
-        f"https://t.me/{bot_username}?startgroup=setup"
-        f"&admin=manage_topics+post_messages+delete_messages"
-    )
+def step1_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url),
+        InlineKeyboardButton(text="✅ Группа создана", callback_data="group_created"),
     ]])
-
 
 def step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     add_url = (
