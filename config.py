@@ -52,3 +52,4 @@ if os.getenv("DEBUG", False):
     DEBUG = True
 else:
     HANDLE_SIGNALS = False
+    DEBUG = False
