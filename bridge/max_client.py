@@ -143,6 +143,13 @@ class MaxUserClient:
                 max_sender_id   = str(getattr(msg, "sender", "") or "")
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
                 has_media, media_type = _detect_media(msg)
+
+                # Скачиваем медиа для живой пересылки в TG
+                media_bytes = None
+                media_name  = None
+                if has_media:
+                    media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
+
                 event = BridgeEvent(
                     direction   = "max_to_tg",
                     tg_user_id  = self.tg_user_id,
@@ -153,6 +160,8 @@ class MaxUserClient:
                     max_msg_id  = msg_id,
                     has_media   = has_media,
                     media_type  = media_type,
+                    media_bytes = media_bytes,
+                    media_name  = media_name,
                 )
                 await max_to_tg_queue.put(event)
             except Exception as e:

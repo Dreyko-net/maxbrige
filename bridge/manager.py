@@ -293,14 +293,6 @@ class BridgeManager:
                 max_client = self.get_client(event.tg_user_id)
             )
 
-        await send_to_telegram(
-            bot        = self._bot,
-            event      = event,
-            user       = user,
-            chat       = chat,
-            max_client = self.get_client(event.tg_user_id)
-        )
-
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────
 
     async def _worker_tg_to_max(self):

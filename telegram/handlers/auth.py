@@ -91,9 +91,6 @@ def step2_kb(bot_username: str) -> InlineKeyboardMarkup:
     )
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_url),
-    ],
-    [
-        InlineKeyboardButton(text="Бот уже добавлен в группу", callback_data="bot_added_group"),
     ]])
 
 
@@ -386,26 +383,6 @@ async def register_group(bot: Bot, group_id: int, tg_user_id: int):
     await bot.send_message(
         group_id,
         f"✅ Группа подключена! {AFTER_GROUP_TEXT}",
-        parse_mode="HTML",
-    )
-
-
-# ── /start в группе (админ) ──────────────────────────────────────────────────
-
-# Заменяем старую start_sync_msg на register_group
-@router.callback_query(F.data == "bot_added_group")
-async def bot_added_as_admin(callback: CallbackQuery, bot: Bot):
-    """Пользователь нажал 'Бот уже добавлен в группу'."""
-    await callback.answer()
-    tg_user_id = callback.from_user.id
-
-    # Пытаемся определить group_id из состояния или сообщения
-    # Для этого случая пользователь нажал кнопку в личке — group_id ещё не известен
-    # Направляем к пересылке сообщения из группы
-    await bot.send_message(
-        tg_user_id,
-        "📎 Перешлите <b>любое сообщение</b> из вашей группы-зеркала сюда,\n"
-        "чтобы я мог определить ID группы.",
         parse_mode="HTML",
     )
 
