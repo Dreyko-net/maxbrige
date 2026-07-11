@@ -25,7 +25,7 @@ router = Router()
 
 # ── Пересланные сообщения (из любых чатов/каналов/групп) → MAX ───────────
 
-@router.message(F.forward_origin)
+@router.message(F.forward_origin, ~F.message_thread_id)
 async def handle_forwarded_media(msg: Message, bot: Bot):
     """
     Пользователь переслал сообщение боту (личка).
