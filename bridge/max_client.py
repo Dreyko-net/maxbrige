@@ -157,6 +157,80 @@ class MaxUserClient:
                 await max_to_tg_queue.put(event)
             except Exception as e:
                 log.error("[user=%s] handle_message error: %s", self.tg_user_id, e)
+    
+    async def _download_live_media(self, msg, chat_id: str, msg_id: str) -> tuple[bytes | None, str | None]:
+        """Скачивает медиа из входящего сообщения MAX для живой пересылки в TG.
+
+        Возвращает (media_bytes, media_name) или (None, None) при ошибке.
+        """
+        import aiohttp
+        from telegram.sender import extract_attachment
+
+        attach_info = extract_attachment(msg)
+        if not attach_info:
+            return None, None
+
+        atype = attach_info["type"]
+        url   = attach_info.get("url")
+        filename = attach_info.get("filename", "file")
+        int_chat_id = int(chat_id) if chat_id else 0
+        int_msg_id  = int(msg_id) if msg_id else 0
+
+        # Прямой URL (photo, audio, sticker)
+        if url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            if data:
+                                return data, filename
+                log.warning("[user=%s] download live media (url) failed: status=%s", self.tg_user_id, resp.status)
+            except Exception as e:
+                log.error("[user=%s] download live media (url) error: %s", self.tg_user_id, e)
+            return None, None
+
+        # Видео — нужен VideoRequest
+        if atype == "video":
+            video_id = attach_info.get("video_id", 0)
+            if not video_id or not int_chat_id:
+                return None, None
+            try:
+                req = await self._client.get_video_by_id(
+                    chat_id=int_chat_id, message_id=int_msg_id, video_id=int(video_id))
+                if req and getattr(req, "url", None):
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                            if resp.status == 200:
+                                data = await resp.read()
+                                if data:
+                                    return data, filename
+            except Exception as e:
+                log.error("[user=%s] download live video error: %s", self.tg_user_id, e)
+            return None, None
+
+        # Файл — нужен FileRequest
+        if atype == "document":
+            file_id = attach_info.get("file_id", 0)
+            if not file_id or not int_chat_id:
+                return None, None
+            try:
+                req = await self._client.get_file_by_id(
+                    chat_id=int_chat_id, message_id=int_msg_id, file_id=int(file_id))
+                if req and getattr(req, "url", None):
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                            if resp.status == 200:
+                                data = await resp.read()
+                                if data:
+                                    return data, filename
+            except Exception as e:
+                log.error("[user=%s] download live file error: %s", self.tg_user_id, e)
+            return None, None
+
+        log.warning("[user=%s] no download method for live media type=%s", self.tg_user_id, atype)
+        return None, None
+
 
     # ── API методы ────────────────────────────────────────────────────────────
 
