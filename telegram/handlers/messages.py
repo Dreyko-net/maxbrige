@@ -202,15 +202,8 @@ async def handle_group_media(msg: Message, bot: Bot):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _find_owner(tg_group_id: int) -> int | None:
-    """Находит tg_user_id владельца по group_id."""
-    import aiosqlite
-    from config import DB_PATH
-    async with aiosqlite.connect(DB_PATH) as conn:
-        async with conn.execute(
-            "SELECT tg_user_id FROM users WHERE tg_group_id=?", (tg_group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else None
+    user = await db.get_user_by_group(tg_group_id)
+    return user.tg_user_id if user else None
 
 
 def _extract_media(msg: Message) -> tuple[str, str, str]:

@@ -194,6 +194,13 @@ class Database:
         )
         await self._db.commit()
         
+    async def get_user_by_group(self, tg_group_id: int) -> Optional[User]:
+        """Находит пользователя по привязанной группе Telegram."""
+        async with self._db.execute(
+            "SELECT * FROM users WHERE tg_group_id = ?", (tg_group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return _user(row) if row else None
 
     # ── Chats ─────────────────────────────────────────────────────────────────
 

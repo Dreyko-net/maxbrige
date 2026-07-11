@@ -49,7 +49,7 @@ CONTROL_TOPIC_NAME: str = "⚙️ Управление"
 if os.getenv("DEBUG", False):
     # Получать ли сиглалы от ОС для остановки (Ctrl+C например)
     HANDLE_SIGNALS = True
-    DEBUG = True
+    DEBUG = os.getenv("DEBUG", False)
 else:
     HANDLE_SIGNALS = False
-    DEBUG = False
+    DEBUG = os.getenv("DEBUG", False)
