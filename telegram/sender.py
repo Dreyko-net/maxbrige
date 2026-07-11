@@ -16,11 +16,16 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 
 from database import db, User, Chat
 from bridge.queue import BridgeEvent
+from config import MAX_SEND_BYTES
 
 if TYPE_CHECKING:
     from bridge.max_client import MaxUserClient
 
 log = logging.getLogger(__name__)
+
+# Внутренний кэш скачанных файлов: {(chat_id, file_id): bytes}
+# Сбрасывается вручную через clear_download_cache()
+_download_cache: dict[tuple, bytes] = {}
 
 
 # ── Форматирование текста ──────────────────────────────────────────────────
@@ -205,9 +210,25 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict,
     # Явно переданный chat_id приоритетнее (msg.chat_id может быть 0)
     chat_id = int(max_chat_id) if max_chat_id else (getattr(msg, "chat_id", 0) or 0)
     msg_id = getattr(msg, "id", 0)
+    # Ключ для кэша: (chat_id, file_id/video_id/audio_id)
+    cache_key = None
+    for fk in ("video_id", "file_id", "audio_id", "photo_id", "sticker_id"):
+        fid = attach_info.get(fk)
+        if fid:
+            cache_key = (chat_id, int(fid))
+            break
+
+    # Проверяем кэш
+    if cache_key and cache_key in _download_cache:
+        log.debug("download_from_max: cache hit for %s", cache_key)
+        return _download_cache[cache_key]
+
     # Прямой URL (photo, audio, sticker)
     if url:
-        return await _download_url(url, timeout=60)
+        data = await _download_url(url, timeout=60)
+        if data and cache_key:
+            _download_cache[cache_key] = data
+        return data
 
     # Видео — нужен VideoRequest
     if atype == "video":
@@ -223,7 +244,10 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict,
                 video_id=int(video_id),
             )
             if req and getattr(req, "url", None):
-                return await _download_url(req.url, timeout=120)
+                data = await _download_url(req.url, timeout=120)
+                if data and cache_key:
+                    _download_cache[cache_key] = data
+                return data
             log.warning("get_video_by_id returned no URL (chat=%s, msg=%s, video=%s)",
                         chat_id, msg_id, video_id)
         except Exception as e:
@@ -245,7 +269,10 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict,
                 file_id=int(file_id),
             )
             if req and getattr(req, "url", None):
-                return await _download_url(req.url, timeout=120)
+                data = await _download_url(req.url, timeout=120)
+                if data and cache_key:
+                    _download_cache[cache_key] = data
+                return data
             log.warning("get_file_by_id returned no URL (chat=%s, msg=%s, file=%s)",
                         chat_id, msg_id, file_id)
         except Exception as e:
@@ -255,6 +282,14 @@ async def download_from_max(client: "MaxUserClient", msg, attach_info: dict,
 
     log.warning("No download method for attachment type=%s", atype)
     return None
+
+def clear_download_cache():
+    """Очищает кэш скачанных файлов. Вызывать после завершения синхронизации."""
+    global _download_cache
+    if _download_cache:
+        log.info("Clearing download cache: %d entries", len(_download_cache))
+        _download_cache.clear()
+
 
 
 async def _download_url(url: str, timeout: int = 60) -> bytes | None:
@@ -322,6 +357,16 @@ async def send_media_to_telegram_topic(
         icon = {"photo": "🖼", "video": "🎬", "document": "📄",
                 "voice": "🎤", "audio": "🎵", "sticker": "😊"}.get(atype, "📎")
         fallback = f"{text}\n{icon} <i>[{atype} — не удалось скачать]</i>" if text else f"{icon} <i>[{atype} — не удалось скачать]</i>"
+        return await send_text_to_topic(bot, group_id, topic_id, fallback)
+
+    # Проверяем размер — если файл слишком большой для прокси/Telegram API
+    if len(data) > MAX_SEND_BYTES:
+        size_mb = len(data) / (1024 * 1024)
+        log.warning("File too large (%.1f MB > %d MB limit), sending as text fallback: %s",
+                    size_mb, MAX_SEND_BYTES // (1024 * 1024), attach_info.get("filename", "?"))
+        icon = {"photo": "🖼", "video": "🎬", "document": "📄",
+                "voice": "🎤", "audio": "🎵", "sticker": "😊"}.get(atype, "📎")
+        fallback = f"{text}\n{icon} <i>[{atype} — файл слишком большой ({size_mb:.1f} МБ)]</i>" if text else f"{icon} <i>[{atype} — файл слишком большой ({size_mb:.1f} МБ)]</i>"
         return await send_text_to_topic(bot, group_id, topic_id, fallback)
 
     filename = attach_info.get("filename", "file")

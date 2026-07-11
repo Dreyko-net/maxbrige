@@ -110,6 +110,7 @@ class SyncWorker:
             format_history_message,
             send_media_to_telegram_topic,
             send_text_to_topic,
+            clear_download_cache,
         )
         now = _now_ms()
         try:
@@ -161,13 +162,22 @@ class SyncWorker:
                 # ── Этап 2: отправляем в Telegram с реальным медиа ──
                 sent_count = 0
                 media_count = 0
+                sender_cache: dict[int, str] = {}  # кэш имён отправителей
                 for msg in messages:
                     try:
                         msg_id    = str(getattr(msg, "id", "") or "")
                         timestamp = getattr(msg, "time", 0) or getattr(msg, "timestamp", 0)
                         sender    = getattr(msg, "sender", None)
                         text      = getattr(msg, "text", "") or ""
-                        sender_name = await client.get_client(sender) if sender else ""
+                        # Кэшируем имя отправителя, чтобы не дёргать API MAX для каждого сообщения
+                        if sender:
+                            if sender in sender_cache:
+                                sender_name = sender_cache[sender]
+                            else:
+                                sender_name = await client.get_client(sender) or ""
+                                sender_cache[sender] = sender_name
+                        else:
+                            sender_name = ""
                         has_media, media_type = _detect_media(msg)
 
                         # Проверяем — есть ли уже tg_msg_id (от предыдущей синхронизации)
@@ -222,6 +232,7 @@ class SyncWorker:
                         log.error("Send to TG error: %s", e)
 
                 await db.set_chat_synced(db_chat.id)
+                clear_download_cache()  # освобождаем память после каждого чата
                 await self._notify(
                     user.tg_group_id,
                     f"Чат <b>{db_chat.max_chat_title}</b>: "
@@ -232,9 +243,11 @@ class SyncWorker:
 
             await self._notify(user.tg_group_id,
                                f"✅ Полная история загружена.")
+            clear_download_cache()  # финальная очистка
         except Exception as e:
             log.error("Full history sync error for user %s: %s",
                       user.tg_user_id, e, exc_info=True)
+            clear_download_cache()  # очищаем даже при ошибке
 
     async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
         if not db_chat.tg_topic_id:

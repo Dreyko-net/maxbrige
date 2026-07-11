@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -124,14 +125,32 @@ async def handle_group_media(msg: Message, bot: Bot):
     if not chat:
         return
 
-    # Скачиваем файл
-    try:
-        media_type, file_id, filename = _extract_media(msg)
-        file = await bot.get_file(file_id)
-        data = await bot.download_file(file.file_path)
-        media_bytes = data.read() if hasattr(data, "read") else bytes(data)
-    except Exception as e:
-        log.error("Download TG media error: %s", e)
+    # Скачиваем файл (с retry при сетевых ошибках)
+    media_type, file_id, filename = _extract_media(msg)
+    media_bytes = None
+    for _dl_attempt in range(3):
+        try:
+            file = await bot.get_file(file_id)
+            data = await bot.download_file(file.file_path)
+            media_bytes = data.read() if hasattr(data, "read") else bytes(data)
+            break
+        except Exception as e:
+            log.warning("Download TG media attempt %d failed: %s", _dl_attempt + 1, e)
+            if _dl_attempt < 2:
+                await asyncio.sleep(2 ** _dl_attempt)
+
+    if not media_bytes:
+        log.error("Download TG media failed after 3 attempts, putting text-only event")
+        # Отправляем хотя бы текст в MAX через очередь
+        fallback = BridgeEvent(
+            direction   = "tg_to_max",
+            tg_user_id  = tg_user_id,
+            max_chat_id = chat.max_chat_id,
+            text        = msg.caption or msg.text or "",
+            timestamp   = int(time.time() * 1000),
+            tg_msg_id   = msg.message_id,
+        )
+        await tg_to_max_queue.put(fallback)
         return
 
     event = BridgeEvent(

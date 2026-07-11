@@ -395,6 +395,7 @@ async def _sync_single_chat(
         format_history_message,
         send_media_to_telegram_topic,
         send_text_to_topic,
+        clear_download_cache,
     )
     to_ts = int(time.time() * 1000)
     sent_count = 0
@@ -418,13 +419,21 @@ async def _sync_single_chat(
 
         log.info("Syncing single chat %s: %d messages", db_chat.max_chat_id, len(messages))
 
+        sender_cache: dict[int, str] = {}
         for msg in messages:
             try:
                 msg_id    = str(getattr(msg, "id", "") or "")
                 timestamp = getattr(msg, "time", 0) or getattr(msg, "timestamp", 0)
                 sender    = getattr(msg, "sender", None)
                 text      = getattr(msg, "text", "") or ""
-                sender_name = await client.get_client(sender) if sender else ""
+                if sender:
+                    if sender in sender_cache:
+                        sender_name = sender_cache[sender]
+                    else:
+                        sender_name = await client.get_client(sender) or ""
+                        sender_cache[sender] = sender_name
+                else:
+                    sender_name = ""
                 has_media, media_type = _detect_media(msg)
 
                 # Проверяем дедупликацию
@@ -488,9 +497,11 @@ async def _sync_single_chat(
             parse_mode="HTML",
             message_thread_id=db_chat.tg_topic_id,
         )
+        clear_download_cache()
 
     except Exception as e:
         log.error("Sync single chat error: %s", e)
+        clear_download_cache()
         await bot.send_message(
             user.tg_group_id,
             f"❌ Ошибка синхронизации: <code>{e}</code>",
