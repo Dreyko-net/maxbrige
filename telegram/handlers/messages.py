@@ -66,21 +66,11 @@ async def handle_forwarded_media(msg: Message, bot: Bot):
         await msg.answer(f"✅ Текст отправлен в чат <b>{last_chat.max_chat_title}</b>", parse_mode="HTML")
         return
 
-    # Скачиваем медиа с retry
-    media_bytes = None
-    for _dl_attempt in range(3):
-        try:
-            file = await bot.get_file(file_id)
-            data = await bot.download_file(file.file_path)
-            media_bytes = data.read() if hasattr(data, "read") else bytes(data)
-            break
-        except Exception as e:
-            log.warning("[forwarded] Download media attempt %d failed: %s", _dl_attempt + 1, e)
-            if _dl_attempt < 2:
-                await asyncio.sleep(2 ** _dl_attempt)
+    # Скачиваем медиа
+    media_bytes = await _download_media(bot, file_id, tag="[forwarded]")
 
     if not media_bytes:
-        log.error("[forwarded] Download media failed after 3 attempts")
+        log.error("[forwarded] Download media failed")
         await msg.answer("❌ Не удалось скачать файл из Telegram.")
         return
 
@@ -156,22 +146,12 @@ async def handle_group_media(msg: Message, bot: Bot):
     if not chat:
         return
 
-    # Скачиваем файл (с retry при сетевых ошибках)
+    # Скачиваем файл
     media_type, file_id, filename = _extract_media(msg)
-    media_bytes = None
-    for _dl_attempt in range(3):
-        try:
-            file = await bot.get_file(file_id)
-            data = await bot.download_file(file.file_path)
-            media_bytes = data.read() if hasattr(data, "read") else bytes(data)
-            break
-        except Exception as e:
-            log.warning("Download TG media attempt %d failed: %s", _dl_attempt + 1, e)
-            if _dl_attempt < 2:
-                await asyncio.sleep(2 ** _dl_attempt)
+    media_bytes = await _download_media(bot, file_id, tag="")
 
     if not media_bytes:
-        log.error("Download TG media failed after 3 attempts, putting text-only event")
+        log.error("Download TG media failed, putting text-only event")
         # Отправляем хотя бы текст в MAX через очередь
         fallback = BridgeEvent(
             direction   = "tg_to_max",
@@ -205,6 +185,94 @@ async def _find_owner(tg_group_id: int) -> int | None:
     user = await db.get_user_by_group(tg_group_id)
     return user.tg_user_id if user else None
 
+
+
+async def _download_media(bot: Bot, file_id: str, tag: str = "") -> bytes | None:
+    """Скачивает файл из Telegram.
+    Сначала пробует обычный способ (для маленьких файлов).
+    При обрыве — докачивает чанками по 4МБ через HTTP Range.
+    """
+    import aiohttp
+
+    file = await bot.get_file(file_id)
+    if not file.file_path:
+        return None
+
+    # Строим URL файла (через прокси бота, если настроен)
+    file_url = bot.session.api.file.format(
+        token=bot.token, path=file.file_path,
+    )
+
+    # 1. Обычное скачивание (для файлов < 5МБ работает)
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(file_url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if data:
+                        return data
+    except Exception as e:
+        log.warning("%s Normal download failed: %s", tag, e)
+
+    # 2. Fallback: чанками через HTTP Range (по 4МБ)
+    log.info("%s Trying Range-based chunked download...", tag)
+    return await _download_chunks(file_url, tag)
+
+
+async def _download_chunks(file_url: str, tag: str = "") -> bytes | None:
+    """Скачивает файл чанками по 4МБ через HTTP Range-запросы."""
+    import aiohttp
+
+    CHUNK = 4 * 1024 * 1024  # 4МБ — ниже порога обрыва ~5МБ
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Узнаём размер файла и проверяем поддержку Range
+        try:
+            async with session.head(file_url) as resp:
+                if resp.status != 200:
+                    return None
+                total = int(resp.headers.get("Content-Length", 0))
+                accepts_range = resp.headers.get("Accept-Ranges", "") == "bytes"
+        except Exception as e:
+            log.warning("%s HEAD request failed: %s", tag, e)
+            return None
+
+        if not accepts_range or total <= CHUNK:
+            log.warning("%s Range not supported or file too small (%d bytes)", tag, total)
+            return None
+
+        log.info("%s Chunked download: total=%d bytes, chunk=%d", tag, total, CHUNK)
+        chunks = []
+        offset = 0
+
+        while offset < total:
+            end = min(offset + CHUNK - 1, total - 1)
+            try:
+                async with session.get(
+                    file_url,
+                    headers={"Range": f"bytes={offset}-{end}"},
+                ) as resp:
+                    if resp.status not in (200, 206):
+                        log.warning("%s Chunk %d-%d: status=%d", tag, offset, end, resp.status)
+                        return None
+                    chunk = await resp.read()
+                    if not chunk:
+                        log.warning("%s Chunk %d-%d: empty response", tag, offset, end)
+                        return None
+                    chunks.append(chunk)
+                    log.info("%s Chunk %d-%d/%d OK (%d bytes)",
+                                tag, offset, end, total, len(chunk))
+            except Exception as e:
+                log.warning("%s Chunk %d-%d failed: %s", tag, offset, end, e)
+                return None
+
+            offset = end + 1
+
+    result = b"".join(chunks)
+    log.info("%s Download complete: %d bytes", tag, len(result))
+    return result
 
 def _extract_media(msg: Message) -> tuple[str, str, str]:
     """Возвращает (media_type, file_id, filename)."""
