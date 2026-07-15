@@ -148,13 +148,15 @@ class MaxUserClient:
                 fwd_attaches_list = None
                 fwd_source = None
                 fwd_msg = None
+                fwd_link = None
                 if hasattr(msg, "model_extra"):
                     link = msg.model_extra.get("link")
                     if isinstance(link, dict) and link.get("type") == "FORWARD":
+                        fwd_link = link
                         fwd_msg = link.get("message", {})
                         fwd_text = fwd_msg.get("text", "") or ""
                         fwd_attaches = fwd_attaches_list = fwd_msg.get("attaches", [])
-                        fwd_source = fwd_msg.get("chatName", "")
+                        fwd_source = link.get("chatName") or fwd_msg.get("chatName", "")
                         if fwd_text or fwd_attaches_list:
                             text = fwd_text
 
@@ -198,7 +200,7 @@ class MaxUserClient:
                         else:
                             continue
 
-                        media_bytes, media_name = await self._download_fwd_media(attach, fwd_msg)
+                        media_bytes, media_name = await self._download_fwd_media(attach, fwd_msg, fwd_link, chat_id, msg_id)
 
                         event = BridgeEvent(
                             direction   = "max_to_tg",
@@ -304,8 +306,12 @@ class MaxUserClient:
         log.warning("[user=%s] no download method for live media type=%s", self.tg_user_id, atype)
         return None, None
     
-    async def _download_fwd_media(self, attach: dict, fwd_msg: dict) -> tuple[bytes | None, str | None]:
+    async def _download_fwd_media(self, attach: dict, fwd_msg: dict, fwd_link: dict, current_chat_id: str, current_msg_id: str) -> tuple[bytes | None, str | None]:
         """Скачивает медиа из пересланного сообщения (сырой dict из model_extra).
+
+        Для видео: chatId берём из fwd_link (link), а не из fwd_msg (link.message),
+        т.к. chatId находится на уровне link, а не внутри link.message.
+        Также пробуем текущий chat_id как fallback.
 
         Возвращает (media_bytes, media_name) или (None, None) при ошибке.
         """
@@ -332,35 +338,44 @@ class MaxUserClient:
                 log.error("[user=%s] download fwd photo error: %s", self.tg_user_id, e)
             return None, None
 
-        # ── Видео: нужен VideoRequest через API (используем chatId/id оригинала) ──
+        # ── Видео: нужен VideoRequest через API ──
         if _type == "VIDEO":
             video_id = attach.get("videoId", 0)
-            source_chat_id = fwd_msg.get("chatId")
             source_msg_id = fwd_msg.get("id")
             filename = f"video_{video_id}.mp4"
-            log.info("[user=%s] fwd video: videoId=%s srcChat=%s srcMsg=%s fwd_msg_keys=%s",
-                     self.tg_user_id, video_id, source_chat_id, source_msg_id,
-                     list(fwd_msg.keys()) if isinstance(fwd_msg, dict) else type(fwd_msg))
-            if not video_id or not source_chat_id or not source_msg_id:
-                log.warning("[user=%s] fwd video: missing ids", self.tg_user_id)
-                return None, None
-            try:
-                req = await self._client.get_video_by_id(
-                    chat_id=int(source_chat_id),
-                    message_id=int(source_msg_id),
-                    video_id=int(video_id))
-                log.info("[user=%s] fwd video get_video_by_id result: %s",
-                         self.tg_user_id, getattr(req, 'url', None) if req else 'None')
-                if req and getattr(req, "url", None):
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                            if resp.status == 200:
-                                data = await resp.read()
-                                if data:
-                                    return data, filename
-                log.warning("[user=%s] fwd video: no url or download failed", self.tg_user_id)
-            except Exception as e:
-                log.error("[user=%s] fwd video error: %s", self.tg_user_id, e)
+            
+            # chatId находится на уровне link, а не link.message
+            source_chat_id = None
+            if fwd_link:
+                source_chat_id = fwd_link.get("chatId")
+
+            log.info("[user=%s] fwd video: videoId=%s linkChatId=%s currentChatId=%s srcMsg=%s",
+                     self.tg_user_id, video_id, source_chat_id, current_chat_id, source_msg_id)
+
+            # Пробуем скачать видео — сначала с chatId из link, потом с текущим chat_id
+            for try_chat_id, label in [(source_chat_id, "link"), (current_chat_id, "current")]:
+                if not try_chat_id or not source_msg_id or not video_id:
+                    continue
+                try:
+                    log.info("[user=%s] fwd video: trying %s chat_id=%s msg_id=%s video_id=%s",
+                             self.tg_user_id, label, try_chat_id, source_msg_id, video_id)
+                    req = await self._client.get_video_by_id(
+                        chat_id=int(try_chat_id),
+                        message_id=int(source_msg_id),
+                        video_id=int(video_id))
+                    log.info("[user=%s] fwd video get_video_by_id (%s) result: %s",
+                             self.tg_user_id, label, getattr(req, 'url', None) if req else 'None')
+                    if req and getattr(req, "url", None):
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    if data:
+                                        return data, filename
+                except Exception as e:
+                    log.warning("[user=%s] fwd video (%s) attempt error: %s", self.tg_user_id, label, e)
+
+            log.warning("[user=%s] fwd video: all download attempts failed", self.tg_user_id)
             return None, None
 
         log.warning("[user=%s] no download method for fwd media _type=%s", self.tg_user_id, _type)
