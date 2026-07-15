@@ -144,6 +144,13 @@ class MaxUserClient:
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
                 has_media, media_type = _detect_media(msg)
 
+                # ── Диагностика: логируем структуру пересланных сообщений ──
+                if not text and not has_media and hasattr(msg, "model_extra") and msg.model_extra:
+                    log.info("[user=%s] FWD DEBUG msg_id=%s extra_keys=%s extra=%s",
+                             self.tg_user_id, msg_id,
+                             list(msg.model_extra.keys()),
+                             msg.model_extra)
+
                 # Скачиваем медиа для живой пересылки в TG
                 media_bytes = None
                 media_name  = None
