@@ -144,18 +144,43 @@ class MaxUserClient:
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
                 has_media, media_type = _detect_media(msg)
 
-                # ── Диагностика: логируем структуру пересланных сообщений ──
-                if not text and not has_media and hasattr(msg, "model_extra") and msg.model_extra:
-                    log.info("[user=%s] FWD DEBUG msg_id=%s extra_keys=%s extra=%s",
-                             self.tg_user_id, msg_id,
-                             list(msg.model_extra.keys()),
-                             msg.model_extra)
+                # ── Пересланные сообщения ──
+                fwd_attach = None
+                fwd_source = None
+                if hasattr(msg, "model_extra"):
+                    link = msg.model_extra.get("link")
+                    if isinstance(link, dict) and link.get("type") == "FORWARD":
+                        fwd_msg = link.get("message", {})
+                        fwd_text = fwd_msg.get("text", "") or ""
+                        fwd_attaches = fwd_msg.get("attaches", [])
+                        if fwd_text or fwd_attaches:
+                            text = fwd_text
+                            fwd_source = fwd_msg.get("chatName", "")
+                            if fwd_attaches:
+                                first = fwd_attaches[0]
+                                _type = (first.get("_type") or "").upper()
+                                if _type == "PHOTO":
+                                    has_media, media_type = True, "photo"
+                                    fwd_attach = first
+                                elif _type == "VIDEO":
+                                    has_media, media_type = True, "video"
+                                    fwd_attach = first
 
                 # Скачиваем медиа для живой пересылки в TG
                 media_bytes = None
                 media_name  = None
                 if has_media:
-                    media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
+                    if fwd_attach is not None:
+                        link = msg.model_extra["link"]
+                        media_bytes, media_name = await self._download_fwd_media(
+                            fwd_attach, link["message"])
+                    else:
+                        media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
+
+                # Добавляем пометку о пересылке
+                if fwd_source:
+                    prefix = f"↩️ Переслано из «{fwd_source}»\n"
+                    text = prefix + text if text else prefix
 
                 event = BridgeEvent(
                     direction   = "max_to_tg",
@@ -246,7 +271,61 @@ class MaxUserClient:
 
         log.warning("[user=%s] no download method for live media type=%s", self.tg_user_id, atype)
         return None, None
+    
+    async def _download_fwd_media(self, attach: dict, fwd_msg: dict) -> tuple[bytes | None, str | None]:
+        """Скачивает медиа из пересланного сообщения (сырой dict из model_extra).
 
+        Возвращает (media_bytes, media_name) или (None, None) при ошибке.
+        """
+        import aiohttp
+
+        _type = (attach.get("_type") or "").upper()
+
+        # ── Фото: прямой URL (baseUrl) ──
+        if _type == "PHOTO":
+            url = attach.get("baseUrl")
+            photo_id = attach.get("photoId", 0)
+            filename = f"photo_{photo_id}.jpg"
+            if not url:
+                return None, None
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            if data:
+                                return data, filename
+                log.warning("[user=%s] download fwd photo failed: status=%s", self.tg_user_id, resp.status)
+            except Exception as e:
+                log.error("[user=%s] download fwd photo error: %s", self.tg_user_id, e)
+            return None, None
+
+        # ── Видео: нужен VideoRequest через API (используем chatId/id оригинала) ──
+        if _type == "VIDEO":
+            video_id = attach.get("videoId", 0)
+            source_chat_id = fwd_msg.get("chatId")
+            source_msg_id = fwd_msg.get("id")
+            filename = f"video_{video_id}.mp4"
+            if not video_id or not source_chat_id or not source_msg_id:
+                return None, None
+            try:
+                req = await self._client.get_video_by_id(
+                    chat_id=int(source_chat_id),
+                    message_id=int(source_msg_id),
+                    video_id=int(video_id))
+                if req and getattr(req, "url", None):
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                            if resp.status == 200:
+                                data = await resp.read()
+                                if data:
+                                    return data, filename
+            except Exception as e:
+                log.error("[user=%s] download fwd video error: %s", self.tg_user_id, e)
+            return None, None
+
+        log.warning("[user=%s] no download method for fwd media _type=%s", self.tg_user_id, _type)
+        return None, None
 
     # ── API методы ────────────────────────────────────────────────────────────
 
