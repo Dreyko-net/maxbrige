@@ -338,8 +338,9 @@ class MaxUserClient:
             source_chat_id = fwd_msg.get("chatId")
             source_msg_id = fwd_msg.get("id")
             filename = f"video_{video_id}.mp4"
-            log.info("[user=%s] fwd video: videoId=%s srcChat=%s srcMsg=%s",
-                     self.tg_user_id, video_id, source_chat_id, source_msg_id)
+            log.info("[user=%s] fwd video: videoId=%s srcChat=%s srcMsg=%s fwd_msg_keys=%s",
+                     self.tg_user_id, video_id, source_chat_id, source_msg_id,
+                     list(fwd_msg.keys()) if isinstance(fwd_msg, dict) else type(fwd_msg))
             if not video_id or not source_chat_id or not source_msg_id:
                 log.warning("[user=%s] fwd video: missing ids", self.tg_user_id)
                 return None, None
