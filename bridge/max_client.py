@@ -145,57 +145,89 @@ class MaxUserClient:
                 has_media, media_type = _detect_media(msg)
 
                 # ── Пересланные сообщения ──
-                fwd_attach = None
+                fwd_attaches_list = None
                 fwd_source = None
+                fwd_msg = None
                 if hasattr(msg, "model_extra"):
                     link = msg.model_extra.get("link")
                     if isinstance(link, dict) and link.get("type") == "FORWARD":
                         fwd_msg = link.get("message", {})
                         fwd_text = fwd_msg.get("text", "") or ""
-                        fwd_attaches = fwd_msg.get("attaches", [])
-                        if fwd_text or fwd_attaches:
+                        fwd_attaches = fwd_attaches_list = fwd_msg.get("attaches", [])
+                        fwd_source = fwd_msg.get("chatName", "")
+                        if fwd_text or fwd_attaches_list:
                             text = fwd_text
-                            fwd_source = fwd_msg.get("chatName", "")
-                            if fwd_attaches:
-                                first = fwd_attaches[0]
-                                _type = (first.get("_type") or "").upper()
-                                if _type == "PHOTO":
-                                    has_media, media_type = True, "photo"
-                                    fwd_attach = first
-                                elif _type == "VIDEO":
-                                    has_media, media_type = True, "video"
-                                    fwd_attach = first
 
-                # Скачиваем медиа для живой пересылки в TG
-                media_bytes = None
-                media_name  = None
-                if has_media:
-                    if fwd_attach is not None:
-                        link = msg.model_extra["link"]
-                        media_bytes, media_name = await self._download_fwd_media(
-                            fwd_attach, link["message"])
-                    else:
+                # ── Формируем пометку о пересылке ──
+                fwd_prefix = ""
+                if fwd_source:
+                    fwd_prefix = f"↩️ Переслано из «{fwd_source}»\n"
+
+                # ── Обычное сообщение (не пересылка или пересылка без вложений) ──
+                if not fwd_attaches_list:
+                    media_bytes = None
+                    media_name  = None
+                    if has_media:
                         media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
 
-                # Добавляем пометку о пересылке
-                if fwd_source:
-                    prefix = f"↩️ Переслано из «{fwd_source}»\n"
-                    text = prefix + text if text else prefix
+                    event = BridgeEvent(
+                        direction   = "max_to_tg",
+                        tg_user_id  = self.tg_user_id,
+                        max_chat_id = chat_id,
+                        max_sender_id = max_sender_id,
+                        text        = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text),
+                        timestamp   = timestamp,
+                        max_msg_id  = msg_id,
+                        has_media   = has_media,
+                        media_type  = media_type,
+                        media_bytes = media_bytes,
+                        media_name  = media_name,
+                    )
+                    await max_to_tg_queue.put(event)
+                else:
+                    # ── Пересылка с вложениями: каждое вложение — отдельный event ──
+                    first_text = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text)
 
-                event = BridgeEvent(
-                    direction   = "max_to_tg",
-                    tg_user_id  = self.tg_user_id,
-                    max_chat_id = chat_id,
-                    max_sender_id = max_sender_id,
-                    text        = text,
-                    timestamp   = timestamp,
-                    max_msg_id  = msg_id,
-                    has_media   = has_media,
-                    media_type  = media_type,
-                    media_bytes = media_bytes,
-                    media_name  = media_name,
-                )
-                await max_to_tg_queue.put(event)
+                    media_sent = False
+                    for i, attach in enumerate(fwd_attaches_list):
+                        _type = (attach.get("_type") or "").upper()
+                        if _type == "PHOTO":
+                            m_type = "photo"
+                        elif _type == "VIDEO":
+                            m_type = "video"
+                        else:
+                            continue
+
+                        media_bytes, media_name = await self._download_fwd_media(attach, fwd_msg)
+
+                        event = BridgeEvent(
+                            direction   = "max_to_tg",
+                            tg_user_id  = self.tg_user_id,
+                            max_chat_id = chat_id,
+                            max_sender_id = max_sender_id,
+                            text        = first_text if i == 0 else "",
+                            timestamp   = timestamp,
+                            max_msg_id  = msg_id,
+                            has_media   = bool(media_bytes),
+                            media_type  = m_type,
+                            media_bytes = media_bytes,
+                            media_name  = media_name,
+                        )
+                        await max_to_tg_queue.put(event)
+                        media_sent = True
+
+                    # Если вложения были, но ни одно не скачалось — хотя бы текст
+                    if not media_sent and first_text:
+                        event = BridgeEvent(
+                            direction   = "max_to_tg",
+                            tg_user_id  = self.tg_user_id,
+                            max_chat_id = chat_id,
+                            max_sender_id = max_sender_id,
+                            text        = first_text,
+                            timestamp   = timestamp,
+                            max_msg_id  = msg_id,
+                        )
+                        await max_to_tg_queue.put(event)
             except Exception as e:
                 log.error("[user=%s] handle_message error: %s", self.tg_user_id, e)
     
@@ -306,13 +338,18 @@ class MaxUserClient:
             source_chat_id = fwd_msg.get("chatId")
             source_msg_id = fwd_msg.get("id")
             filename = f"video_{video_id}.mp4"
+            log.info("[user=%s] fwd video: videoId=%s srcChat=%s srcMsg=%s",
+                     self.tg_user_id, video_id, source_chat_id, source_msg_id)
             if not video_id or not source_chat_id or not source_msg_id:
+                log.warning("[user=%s] fwd video: missing ids", self.tg_user_id)
                 return None, None
             try:
                 req = await self._client.get_video_by_id(
                     chat_id=int(source_chat_id),
                     message_id=int(source_msg_id),
                     video_id=int(video_id))
+                log.info("[user=%s] fwd video get_video_by_id result: %s",
+                         self.tg_user_id, getattr(req, 'url', None) if req else 'None')
                 if req and getattr(req, "url", None):
                     async with aiohttp.ClientSession() as session:
                         async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
@@ -320,8 +357,9 @@ class MaxUserClient:
                                 data = await resp.read()
                                 if data:
                                     return data, filename
+                log.warning("[user=%s] fwd video: no url or download failed", self.tg_user_id)
             except Exception as e:
-                log.error("[user=%s] download fwd video error: %s", self.tg_user_id, e)
+                log.error("[user=%s] fwd video error: %s", self.tg_user_id, e)
             return None, None
 
         log.warning("[user=%s] no download method for fwd media _type=%s", self.tg_user_id, _type)
