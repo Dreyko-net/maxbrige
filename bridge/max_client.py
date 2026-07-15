@@ -371,6 +371,18 @@ class MaxUserClient:
             log.error("[user=%s] send_photo error: %s", self.tg_user_id, e)
             return None
 
+    async def send_video(self, max_chat_id, data, filename="video.mp4", caption="", sender_name: Optional[str] = None):
+        try:
+            from pymax.files.video import Video
+            result = await self._client.send_message(
+                chat_id=int(max_chat_id), text=caption,
+                attachments=[Video(raw=data, name=filename or "video.mp4")])
+            return str(getattr(result, "id", "") or "")
+        except Exception as e:
+            log.error("[user=%s] send_video error: %s", self.tg_user_id, e)
+            return None
+
+
     async def download_file(self, chat_id, message_id, file_id):
         try:
             req = await self._client.get_file_by_id(

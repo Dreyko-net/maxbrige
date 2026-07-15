@@ -314,12 +314,26 @@ class BridgeManager:
             return
 
         if event.has_media and event.media_bytes:
-            await client.send_file(
-                max_chat_id = event.max_chat_id,
-                data        = event.media_bytes,
-                filename    = event.media_name or "file",
-                caption     = event.text,
-            )
+            if event.media_type == "photo":
+                await client.send_photo(
+                    max_chat_id = event.max_chat_id,
+                    data        = event.media_bytes,
+                    caption     = event.text,
+                )
+            elif event.media_type == "video":
+                await client.send_video(
+                    max_chat_id = event.max_chat_id,
+                    data        = event.media_bytes,
+                    filename    = event.media_name or "video.mp4",
+                    caption     = event.text,
+                )
+            else:
+                await client.send_file(
+                    max_chat_id = event.max_chat_id,
+                    data        = event.media_bytes,
+                    filename    = event.media_name or "file",
+                    caption     = event.text,
+                )
         elif event.text:
             await client.send_message(
                 max_chat_id = event.max_chat_id,
