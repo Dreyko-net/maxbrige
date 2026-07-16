@@ -37,8 +37,8 @@ async def _set_bot_commands(bot: Bot):
 
 def create_bot(token: str) -> tuple[Bot, Dispatcher]:
     proxy = TG_PROXY.rstrip("/") if TG_PROXY != '' else ""
-
-    if proxy:
+    print('Прокси установлен:' + str(proxy))
+    if proxy != '':
         server = TelegramAPIServer.from_base(proxy)
         if DEBUG:
             log.info("Using Telegram API proxy: %s", proxy)
