@@ -66,6 +66,82 @@ def format_live_message(sender_name: str, text: str, has_media: bool = False,
     return f"👤 <b>{sender_name}</b>\n{body}" if body else f"👤 <b>{sender_name}</b>"
 
 
+
+def extract_single_attach(attach) -> dict | None:
+    """Извлекает информацию об одном вложении (по объекту attach, не из msg).
+
+    Возвращает тот же формат что и extract_attachment, но для произвольного attach.
+    """
+    cls_name = type(attach).__name__.lower()
+    atype_str = getattr(attach, "type", None) or ""
+
+    if cls_name in ("controlattachment", "unknownattachment", "inlinekeyboardattachment"):
+        return None
+    if atype_str in ("CONTROL", "INLINE_KEYBOARD", "UNKNOWN"):
+        return None
+
+    if "photo" in cls_name or atype_str == "PHOTO":
+        photo_id = getattr(attach, "photo_id", 0)
+        base_url = getattr(attach, "base_url", None)
+        return {"type": "photo", "attach": attach, "url": base_url,
+                "filename": f"photo_{photo_id}.jpg", "photo_id": photo_id}
+
+    if "video" in cls_name or atype_str == "VIDEO":
+        video_id = getattr(attach, "video_id", 0)
+        return {"type": "video", "attach": attach, "url": None,
+                "filename": f"video_{video_id}.mp4", "video_id": video_id,
+                "duration": getattr(attach, "duration", None)}
+
+    if "file" in cls_name or atype_str == "FILE":
+        file_id = getattr(attach, "file_id", 0)
+        name = getattr(attach, "name", None)
+        return {"type": "document", "attach": attach, "url": None,
+                "filename": name or f"file_{file_id}", "file_id": file_id,
+                "size": getattr(attach, "size", 0)}
+
+    if "audio" in cls_name or atype_str == "AUDIO":
+        audio_id = getattr(attach, "audio_id", 0)
+        duration = getattr(attach, "duration", 0) or 0
+        url = getattr(attach, "url", None)
+        if duration > 0 and duration <= 300:
+            atype = "voice"
+            filename = f"voice_{audio_id or 0}.ogg"
+        else:
+            atype = "audio"
+            filename = f"audio_{audio_id or 0}.mp3"
+        return {"type": atype, "attach": attach, "url": url,
+                "filename": filename, "audio_id": audio_id, "duration": duration}
+
+    if "sticker" in cls_name or atype_str == "STICKER":
+        url = getattr(attach, "url", None)
+        sticker_id = getattr(attach, "sticker_id", 0)
+        return {"type": "sticker", "attach": attach, "url": url,
+                "filename": f"sticker_{sticker_id}.webp"}
+
+    if "share" in cls_name or atype_str == "SHARE":
+        return {"type": "share", "attach": attach, "url": None, "filename": None}
+
+    if "contact" in cls_name or atype_str == "CONTACT":
+        return {"type": "contact", "attach": attach, "url": None, "filename": None}
+
+    if "call" in cls_name or atype_str == "CALL":
+        return {"type": "call", "attach": attach, "url": None, "filename": None}
+
+    log.debug("Skipping unknown attachment: cls=%s api_type=%s", cls_name, atype_str)
+    return None
+
+
+def extract_all_attachments(msg) -> list[dict]:
+    """Извлекает информацию обо всех вложениях из сообщения."""
+    attaches = getattr(msg, "attaches", None) or []
+    result = []
+    for att in attaches:
+        info = extract_single_attach(att)
+        if info:
+            result.append(info)
+    return result
+
+
 # ── Извлечение вложения из сообщения MAX ───────────────────────────────────
 
 def extract_attachment(msg) -> dict | None:
