@@ -444,7 +444,18 @@ class BridgeManager:
                             video=buf, caption=cap, parse_mode="HTML" if cap else None,
                         )
                 except Exception as e:
-                    log.warning("individual send failed for %s: %s — skipping", filename, e)
+                    log.warning("individual send failed for %s: %s", filename, e)
+                    # Фото с невалидными размерами — пробуем как документ
+                    if mtype == "photo":
+                        log.info("retrying %s as document", filename)
+                        try:
+                            sent = await _send_with_retry(
+                                bot.send_document,
+                                chat_id=group_id, message_thread_id=topic_id,
+                                document=buf, caption=cap, parse_mode="HTML" if cap else None,
+                            )
+                        except Exception as e2:
+                            log.warning("document fallback also failed for %s: %s", filename, e2)
                 if sent and not first_tg_msg_id:
                     first_tg_msg_id = sent.message_id
 
