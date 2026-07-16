@@ -486,8 +486,9 @@ class BridgeManager:
                 tg_msg_id=first_tg_msg_id,
                 has_media=True,
             )
-        elif not group_items and not large_items:
-            # Ничего не отправилось — хотя бы текст
+
+        # Если ничего не отправилось — отправляем хотя бы текст
+        if not first_tg_msg_id and caption:
             await send_text_to_topic(bot, group_id, topic_id, caption)
 
     async def _send_large_file_as_link(self, bot, group_id: int, topic_id: int,
