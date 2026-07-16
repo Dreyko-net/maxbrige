@@ -1,4 +1,5 @@
 import logging
+import socket
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
@@ -49,6 +50,7 @@ def create_bot(token: str) -> tuple[Bot, Dispatcher]:
         bot = Bot(token=token, session=session)
     else:
         log.info("Using direct Telegram connection")
+        _diag_direct_connection()
         bot = Bot(token=token)
 
     dp = Dispatcher(storage=MemoryStorage())
@@ -63,3 +65,51 @@ def create_bot(token: str) -> tuple[Bot, Dispatcher]:
     dp.startup.register(_set_bot_commands)
 
     return bot, dp
+
+
+def _diag_direct_connection():
+    """Диагностика прямого подключения к Telegram (DNS + TCP + TLS).
+
+    Помогает отличить проблемы DNS, TCP-блокировки и DPI/TLS-блокировки.
+    """
+    host = "api.telegram.org"
+    port = 443
+
+    # 1. DNS-резолвинг
+    try:
+        ips = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        resolved = list(set(addr[4][0] for addr in ips))
+        log.info("[DIAG] DNS resolved %s → %s", host, resolved)
+    except Exception as e:
+        log.error("[DIAG] DNS failed for %s: %s", host, e)
+        return
+
+    # 2. TCP-подключение
+    for ip in resolved:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(5)
+                result = s.connect_ex((ip, port))
+                if result == 0:
+                    log.info("[DIAG] TCP %s:%d — OK", ip, port)
+                else:
+                    log.warning("[DIAG] TCP %s:%d — FAILED (errno=%d)", ip, port, result)
+        except Exception as e:
+            log.warning("[DIAG] TCP %s:%d — ERROR: %s", ip, port, e)
+
+    # 3. TLS-проверка (имитируем реальное HTTPS-подключение)
+    import ssl
+    ctx = ssl.create_default_context()
+    try:
+        with socket.create_connection((host, port), timeout=10) as s:
+            with ctx.wrap_socket(s, server_hostname=host) as tls:
+                log.info("[DIAG] TLS to %s — OK (cipher: %s, version: %s)",
+                         host, tls.cipher(), tls.version())
+    except ssl.SSLError as e:
+        log.error("[DIAG] TLS to %s — SSL ERROR (likely DPI/SNI block): %s", host, e)
+    except ConnectionResetError:
+        log.error("[DIAG] TLS to %s — CONNECTION RESET (likely DPI/SNI block)", host)
+    except OSError as e:
+        log.error("[DIAG] TLS to %s — OS ERROR: %s", host, e)
+    except Exception as e:
+        log.error("[DIAG] TLS to %s — FAILED: %s", host, e)
