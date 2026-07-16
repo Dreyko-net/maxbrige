@@ -32,6 +32,9 @@ class BridgeEvent:
     media_type:  str  | None = None   # photo/video/document/voice
     media_bytes: bytes| None = None   # данные файла (если уже скачан)
     media_name:  str  | None = None   # имя файла для document
+    # альбом: несколько фото/видео в одном сообщении (send_media_group)
+    media_group: list[dict] | None = None  # [{"bytes": bytes, "filename": str, "type": "photo"|"video"}]
+
 
 
 class MessageQueue:

@@ -192,11 +192,13 @@ class MaxUserClient:
                     )
                     await max_to_tg_queue.put(event)
                 else:
-                    # ── Пересылка с вложениями: каждое вложение — отдельный event ──
+                    # ── Пересылка с вложениями: группируем фото/видео в альбом ──
                     first_text = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text)
 
-                    media_sent = False
-                    for i, attach in enumerate(fwd_attaches_list):
+                    album_items = []   # фото/видео → send_media_group
+                    other_items = []   # файлы/голосовые/стикеры → по одному
+
+                    for attach in fwd_attaches_list:
                         _type = (attach.get("_type") or "").upper()
                         if _type == "PHOTO":
                             m_type = "photo"
@@ -215,14 +217,45 @@ class MaxUserClient:
                                         self.tg_user_id, _type)
                             continue
 
-                        media_bytes, media_name = await self._download_fwd_media(attach, fwd_msg, fwd_link, chat_id, msg_id)
+                        media_bytes, media_name = await self._download_fwd_media(
+                            attach, fwd_msg, fwd_link, chat_id, msg_id)
 
+                        if _type in ("PHOTO", "VIDEO"):
+                            if media_bytes:
+                                album_items.append({
+                                    "bytes": media_bytes,
+                                    "filename": media_name or ("photo.jpg" if _type == "PHOTO" else "video.mp4"),
+                                    "type": m_type,
+                                })
+                        else:
+                            other_items.append((m_type, media_bytes, media_name))
+
+                    any_sent = False
+
+                    # Альбом: несколько фото/видео одним сообщением
+                    if album_items:
                         event = BridgeEvent(
                             direction   = "max_to_tg",
                             tg_user_id  = self.tg_user_id,
                             max_chat_id = chat_id,
                             max_sender_id = max_sender_id,
-                            text        = first_text if i == 0 else "",
+                            text        = first_text,
+                            timestamp   = timestamp,
+                            max_msg_id  = msg_id,
+                            media_group = album_items,
+                        )
+                        await max_to_tg_queue.put(event)
+                        any_sent = True
+
+                    # Остальные вложения — по одному
+                    for i, (m_type, media_bytes, media_name) in enumerate(other_items):
+                        txt = first_text if not any_sent and i == 0 else ""
+                        event = BridgeEvent(
+                            direction   = "max_to_tg",
+                            tg_user_id  = self.tg_user_id,
+                            max_chat_id = chat_id,
+                            max_sender_id = max_sender_id,
+                            text        = txt,
                             timestamp   = timestamp,
                             max_msg_id  = msg_id,
                             has_media   = bool(media_bytes),
@@ -231,10 +264,10 @@ class MaxUserClient:
                             media_name  = media_name,
                         )
                         await max_to_tg_queue.put(event)
-                        media_sent = True
+                        any_sent = True
 
-                    # Если вложения были, но ни одно не скачалось — хотя бы текст
-                    if not media_sent and first_text:
+                    # Если ничего не скачалось — хотя бы текст
+                    if not any_sent and first_text:
                         event = BridgeEvent(
                             direction   = "max_to_tg",
                             tg_user_id  = self.tg_user_id,

@@ -196,6 +196,34 @@ class BridgeManager:
                         event.max_chat_id, event.tg_user_id)
             return
 
+        # ── Альбом: несколько фото/видео в одном сообщении ──
+        if event.media_group:
+            max_client = self.get_client(event.tg_user_id)
+            sender_name = ""
+            if max_client and event.max_sender_id:
+                try:
+                    sender_name = await max_client.get_client(event.max_sender_id) or ""
+                except Exception:
+                    pass
+
+            caption = format_live_message(
+                sender_name = sender_name,
+                text        = event.text,
+                has_media   = False,
+                media_type  = None,
+            )
+
+            await self._send_media_group_to_tg(
+                bot=self._bot,
+                group_id=user.tg_group_id,
+                topic_id=chat.tg_topic_id,
+                caption=caption,
+                user=user,
+                chat=chat,
+                event=event,
+            )
+            return
+
         # Если медиа скачано — отправляем реальным медиа-методом
         if event.has_media and event.media_bytes:
             max_client = self.get_client(event.tg_user_id)
@@ -321,6 +349,99 @@ class BridgeManager:
                 chat       = chat,
                 max_client = self.get_client(event.tg_user_id)
             )
+
+    async def _send_media_group_to_tg(self, bot, group_id: int, topic_id: int,
+                                       caption: str, user, chat, event: BridgeEvent):
+        """Отправляет группу фото/видео как альбом (send_media_group).
+
+        Файлы > TG_MAX_FILE_SIZE извлекаются и отправляются отдельными ссылками.
+        """
+        from aiogram.types import BufferedInputFile, InputMediaPhoto, InputMediaVideo
+        from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+        from telegram.sender import send_text_to_topic
+
+        group_items = []   # Для send_media_group
+        large_items = []   # Для отдельных ссылок
+
+        for item in event.media_group:
+            data = item["bytes"]
+            filename = item["filename"]
+            mtype = item["type"]
+
+            if len(data) > TG_MAX_FILE_SIZE:
+                large_items.append(item)
+                continue
+
+            buf = BufferedInputFile(data, filename=filename)
+            if mtype == "photo":
+                group_items.append(InputMediaPhoto(media=buf))
+            else:
+                group_items.append(InputMediaVideo(media=buf))
+
+        first_tg_msg_id = None
+
+        # Отправляем альбом
+        if group_items:
+            # Caption — только на первый элемент
+            if caption:
+                group_items[0].caption = caption[:1024]
+                group_items[0].parse_mode = "HTML"
+
+            # send_media_group возвращает list[Message], а не Message
+            for attempt in range(3):
+                try:
+                    messages = await bot.send_media_group(
+                        chat_id=group_id,
+                        message_thread_id=topic_id,
+                        media=group_items,
+                    )
+                    if messages:
+                        first_tg_msg_id = messages[0].message_id
+                    break
+                except TelegramRetryAfter as e:
+                    wait = e.retry_after + 1
+                    log.warning("send_media_group retry (flood), waiting %ds (attempt %d)",
+                                wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                except TelegramNetworkError as e:
+                    wait = 2 ** attempt + 1
+                    log.warning("send_media_group retry (network: %s), waiting %ds (attempt %d)",
+                                type(e).__name__, wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                except Exception as e:
+                    log.error("send_media_group error: %s", e)
+                    break
+
+        # Отправляем большие файлы как ссылки
+        link_caption = "" if group_items else caption  # caption уже в альбоме
+        for item in large_items:
+            await self._send_large_file_as_link(
+                bot=bot,
+                group_id=group_id,
+                topic_id=topic_id,
+                data=item["bytes"],
+                filename=item["filename"],
+                caption=link_caption,
+                atype=item["type"],
+                user=user,
+                chat=chat,
+                event=event,
+            )
+            link_caption = ""  # только первый получает caption
+
+        # Сохраняем в БД
+        if first_tg_msg_id:
+            await db.save_message(
+                user_id=user.id, chat_id=chat.id,
+                direction="max_to_tg", timestamp=event.timestamp,
+                max_sender_id=event.max_sender_id,
+                max_msg_id=event.max_msg_id,
+                tg_msg_id=first_tg_msg_id,
+                has_media=True,
+            )
+        elif not group_items and not large_items:
+            # Ничего не отправилось — хотя бы текст
+            await send_text_to_topic(bot, group_id, topic_id, caption)
 
     async def _send_large_file_as_link(self, bot, group_id: int, topic_id: int,
                                         data: bytes, filename: str, caption: str,
