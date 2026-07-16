@@ -357,29 +357,96 @@ class MaxUserClient:
                 if not try_chat_id or not source_msg_id or not video_id:
                     continue
                 try:
-                    log.info("[user=%s] fwd video: trying %s chat_id=%s msg_id=%s video_id=%s",
-                             self.tg_user_id, label, try_chat_id, source_msg_id, video_id)
-                    req = await self._client.get_video_by_id(
-                        chat_id=int(try_chat_id),
-                        message_id=int(source_msg_id),
-                        video_id=int(video_id))
-                    log.info("[user=%s] fwd video get_video_by_id (%s) result: %s",
-                             self.tg_user_id, label, getattr(req, 'url', None) if req else 'None')
-                    if req and getattr(req, "url", None):
+                    video_url = await self._get_video_url_raw(
+                        int(try_chat_id), int(source_msg_id), int(video_id))
+                    log.info("[user=%s] fwd video (%s) url=%s",
+                             self.tg_user_id, label, video_url)
+                    if video_url:
                         async with aiohttp.ClientSession() as session:
-                            async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                            async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                                 if resp.status == 200:
                                     data = await resp.read()
                                     if data:
                                         return data, filename
                 except Exception as e:
-                    log.warning("[user=%s] fwd video (%s) attempt error: %s", self.tg_user_id, label, e)
+                    log.warning("[user=%s] fwd video (%s) error: %s", self.tg_user_id, label, e)
 
-            log.warning("[user=%s] fwd video: all download attempts failed", self.tg_user_id)
+            log.warning("[user=%s] fwd video: all attempts failed", self.tg_user_id)
             return None, None
 
         log.warning("[user=%s] no download method for fwd media _type=%s", self.tg_user_id, _type)
         return None, None
+
+    async def _get_video_url_raw(self, chat_id: int, message_id: int, video_id: int) -> str | None:
+        """Получает URL видео через сырой invoke, обходя валидацию VideoRequest.
+
+        Для пересланных видео MAX API возвращает url как список доменов,
+        а VideoRequest.url: str → ValidationError. Поэтому используем
+        client._app.invoke(Opcode.VIDEO_PLAY) напрямую — тот же механизм
+        что и get_video_by_id, но без parse_payload_model.
+        """
+        from pymax.protocol.enums import Opcode
+
+        # Сначала стандартный путь (для обычных видео url — строка)
+        try:
+            req = await self._client.get_video_by_id(
+                chat_id=chat_id, message_id=message_id, video_id=video_id)
+            if req and getattr(req, "url", None):
+                return req.url
+        except Exception:
+            pass  # Ожидаемо для пересланных видео
+
+        # Сырой запрос — получаем payload dict без валидации Pydantic
+        response = await self._client._app.invoke(
+            opcode=Opcode.VIDEO_PLAY,
+            payload={
+                "chatId": chat_id,
+                "messageId": str(message_id),
+                "videoId": video_id,
+            },
+        )
+        raw = response.payload if hasattr(response, "payload") else None
+        log.info("[user=%s] raw VIDEO_PLAY payload: %s", self.tg_user_id, raw)
+        return self._extract_video_url(raw, video_id)
+
+    def _extract_video_url(self, raw: dict | None, video_id: int) -> str | None:
+        """Извлекает URL видео из сырого payload VIDEO_PLAY.
+
+        Форматы ответа:
+        1) url: "https://..." — готовый URL
+        2) url: ["domain"] + другой ключ с токеном — склеиваем
+        3) Произвольный ключ (не EXTERNAL/cache/url) — как unwrap_dynamic_url
+        """
+        if not raw or not isinstance(raw, dict):
+            return None
+
+        # 1) url — готовая строка
+        url_val = raw.get("url")
+        if isinstance(url_val, str) and url_val:
+            return url_val
+
+        # 2) url — список доменов, ищем токен в других ключах
+        if isinstance(url_val, list) and url_val:
+            domain = url_val[0]
+            token = ""
+            for key, val in raw.items():
+                if key.lower() in ("external", "cache", "url"):
+                    continue
+                if isinstance(val, str) and val:
+                    token = val
+                    break
+            result = f"https://{domain}/{video_id}/{token}" if token else f"https://{domain}/{video_id}"
+            log.info("[user=%s] constructed url: %s", self.tg_user_id, result)
+            return result
+
+        # 3) Произвольный ключ с URL (как unwrap_dynamic_url в VideoRequest)
+        for key, val in raw.items():
+            if key.lower() in ("external", "cache", "url"):
+                continue
+            if isinstance(val, str) and val:
+                return val
+
+        return None
 
     # ── API методы ────────────────────────────────────────────────────────────
 
