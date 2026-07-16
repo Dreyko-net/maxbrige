@@ -355,12 +355,14 @@ class BridgeManager:
         """Отправляет группу фото/видео как альбом (send_media_group).
 
         Файлы > TG_MAX_FILE_SIZE извлекаются и отправляются отдельными ссылками.
+        При ошибке send_media_group — фоллбэк на поодиночную отправку.
         """
         from aiogram.types import BufferedInputFile, InputMediaPhoto, InputMediaVideo
-        from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
-        from telegram.sender import send_text_to_topic
+        from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError, TelegramBadRequest
+        from telegram.sender import send_text_to_topic, _send_with_retry
 
         group_items = []   # Для send_media_group
+        group_sources = [] # Параллельный список исходных item dicts
         large_items = []   # Для отдельных ссылок
 
         is_first = True
@@ -380,13 +382,14 @@ class BridgeManager:
                 group_items.append(InputMediaPhoto(media=buf, caption=cap, parse_mode=pm))
             else:
                 group_items.append(InputMediaVideo(media=buf, caption=cap, parse_mode=pm))
+            group_sources.append(item)
             is_first = False
 
         first_tg_msg_id = None
+        album_failed = False
 
         # Отправляем альбом
         if group_items:
-            # send_media_group возвращает list[Message], а не Message
             for attempt in range(3):
                 try:
                     messages = await bot.send_media_group(
@@ -407,12 +410,46 @@ class BridgeManager:
                     log.warning("send_media_group retry (network: %s), waiting %ds (attempt %d)",
                                 type(e).__name__, wait, attempt + 1)
                     await asyncio.sleep(wait)
+                except TelegramBadRequest as e:
+                    log.warning("send_media_group bad request: %s — falling back to individual send", e)
+                    album_failed = True
+                    break
                 except Exception as e:
-                    log.error("send_media_group error: %s", e)
+                    log.error("send_media_group error: %s — falling back to individual send", e)
+                    album_failed = True
                     break
 
+        # Фоллбэк: если альбом не удался — отправляем каждое медиа по отдельности
+        if album_failed and group_items:
+            log.info("Sending %d media items individually (album fallback)", len(group_items))
+            for i, (gm_item, src_item) in enumerate(zip(group_items, group_sources)):
+                data = src_item["bytes"]
+                filename = src_item["filename"]
+                mtype = src_item["type"]
+                buf = BufferedInputFile(data, filename=filename)
+                # Caption — только к первому
+                cap = caption[:1024] if (i == 0 and caption) else None
+                sent = None
+                try:
+                    if mtype == "photo":
+                        sent = await _send_with_retry(
+                            bot.send_photo,
+                            chat_id=group_id, message_thread_id=topic_id,
+                            photo=buf, caption=cap, parse_mode="HTML" if cap else None,
+                        )
+                    else:
+                        sent = await _send_with_retry(
+                            bot.send_video,
+                            chat_id=group_id, message_thread_id=topic_id,
+                            video=buf, caption=cap, parse_mode="HTML" if cap else None,
+                        )
+                except Exception as e:
+                    log.warning("individual send failed for %s: %s — skipping", filename, e)
+                if sent and not first_tg_msg_id:
+                    first_tg_msg_id = sent.message_id
+
         # Отправляем большие файлы как ссылки
-        link_caption = "" if group_items else caption  # caption уже в альбоме
+        link_caption = "" if first_tg_msg_id else caption
         for item in large_items:
             await self._send_large_file_as_link(
                 bot=bot,
