@@ -9,3 +9,4 @@ database/
 load_env.bat
 sessions/
 .vscode/launch.json
+files/

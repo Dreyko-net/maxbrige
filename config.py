@@ -41,10 +41,21 @@ FLOOD_SLEEP: float = float(os.getenv("FLOOD_SLEEP", "0.05"))
 # значения будут отправляться как текстовый фоллбэк без попытки отправки.
 MAX_SEND_BYTES: int = int(os.getenv("MAX_SEND_BYTES", str(10 * 1024 * 1024)))  # 10 МБ по умолчанию
 
-# Максимальный размер одного файла (байт) для отправки через Telegram Bot API.
-# Cloud API: 50 МБ, Local Bot API: до 2000 МБ.
-# Файлы больше этого значения будут разбиты на части и отправлены как документы.
-TG_CHUNK_SIZE: int = int(os.getenv("TG_CHUNK_SIZE", str(40 * 1024 * 1024)))  # 50 МБ по умолчанию
+# Максимальный размер файла (байт) для прямой отправки через Telegram Bot API.
+# Файлы больше этого размера сохраняются на диск и отправляются ссылкой.
+TG_MAX_FILE_SIZE: int = int(os.getenv("TG_MAX_FILE_SIZE", str(49 * 1024 * 1024)))  # 50 МБ
+
+# ── Файловый сервер (для больших файлов) ─────────────────────────────────────
+# Директория для сохранения файлов, не помещающихся в лимит Telegram.
+FILES_DIR: Path = Path(os.getenv("FILES_DIR", str(BASE_DIR / "files")))
+FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Базовый URL для скачивания файлов (без слэша на конце).
+# Пример: "https://example.com/files" или "http://192.168.1.100:8090/files"
+FILES_URL_BASE: str = os.getenv("FILES_URL_BASE", "")
+
+# Срок хранения файлов на диске (дней).
+FILES_MAX_AGE_DAYS: int = int(os.getenv("FILES_MAX_AGE_DAYS", "7"))
 
 # ── Служебная тема ────────────────────────────────────────────────────────────
 CONTROL_TOPIC_NAME: str = "⚙️ Управление"

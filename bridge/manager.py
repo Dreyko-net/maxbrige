@@ -6,12 +6,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional, TYPE_CHECKING
 
 from database import db, User
 from bridge.max_client import MaxUserClient, session_path_for
-from config import SESSIONS_DIR
+from config import (
+    SESSIONS_DIR,
+    TG_MAX_FILE_SIZE,
+    FILES_DIR,
+    FILES_URL_BASE,
+    FILES_MAX_AGE_DAYS,
+)
 from bridge.queue import BridgeEvent, max_to_tg_queue, tg_to_max_queue
 from bridge.sync_worker import SyncWorker
 
@@ -45,6 +52,7 @@ class BridgeManager:
         self._tasks.append(asyncio.create_task(self._worker_max_to_tg()))
         self._tasks.append(asyncio.create_task(self._worker_tg_to_max()))
         self._tasks.append(asyncio.create_task(self._purge_media_loop()))
+        self._tasks.append(asyncio.create_task(self._cleanup_old_files()))
         log.info("BridgeManager started.")
 
     async def stop(self):
@@ -123,7 +131,7 @@ class BridgeManager:
             await client.stop()
 
         # Удаляем файл сессии pymax чтобы не пытался войти по старому токену
-        import os, glob
+        import glob
         session_pattern = str(SESSIONS_DIR / f"user_{tg_user_id}" / "session.db")
         for f in glob.glob(session_pattern):
             try:
@@ -174,10 +182,9 @@ class BridgeManager:
             send_to_telegram,
             format_live_message,
             send_text_to_topic,
+            _send_with_retry,
         )
         from aiogram.types import BufferedInputFile
-        from telegram.sender import _send_with_retry
-        from config import TG_CHUNK_SIZE
 
         user = await db.get_user(event.tg_user_id)
         if not user or not user.tg_group_id:
@@ -211,11 +218,11 @@ class BridgeManager:
             data = event.media_bytes
             data_size = len(data)
 
-            # Файл превышает лимит Telegram — разбиваем на части
-            if data_size > TG_CHUNK_SIZE:
-                log.info("File too large (%.1f MB > %d MB), splitting into chunks",
-                         data_size / (1024*1024), TG_CHUNK_SIZE // (1024*1024))
-                await self._send_chunked_media(
+            # Файл превышает лимит Telegram — сохраняем на диск и отправляем ссылку
+            if data_size > TG_MAX_FILE_SIZE:
+                log.info("File too large (%.1f MB > %d MB), saving to disk",
+                         data_size / (1024*1024), TG_MAX_FILE_SIZE // (1024*1024))
+                await self._send_large_file_as_link(
                     bot=self._bot,
                     group_id=user.tg_group_id,
                     topic_id=chat.tg_topic_id,
@@ -315,88 +322,88 @@ class BridgeManager:
                 max_client = self.get_client(event.tg_user_id)
             )
 
+    async def _send_large_file_as_link(self, bot, group_id: int, topic_id: int,
+                                        data: bytes, filename: str, caption: str,
+                                        atype: str, user, chat, event: BridgeEvent):
+        """Сохраняет большой файл на диск и отправляет в чат ссылку для скачивания."""
+        import time as _time
 
-    async def _send_chunked_media(self, bot, group_id: int, topic_id: int,
-                                   data: bytes, filename: str, caption: str,
-                                   atype: str, user, chat, event: BridgeEvent):
-        """Разбивает большой файл на части и отправляет каждую как документ.
-
-        Каждая часть отправляется через send_document с именем
-        «имя_файла.partN.расширение». Первая часть содержит caption
-        с именем отправителя и текстом, последующие — пометку [часть N/M].
-        """
-        from aiogram.types import BufferedInputFile
-        from telegram.sender import _send_with_retry
-        from config import TG_CHUNK_SIZE
-        import os
-
-        chunk_size = TG_CHUNK_SIZE
-        total_size = len(data)
-        total_parts = (total_size + chunk_size - 1) // chunk_size
-
-        # Формируем базовое имя и расширение для частей
-        base, ext = os.path.splitext(filename)
+        # Формируем имя файла: <timestamp>.<extension>
+        _, ext = os.path.splitext(filename)
         if not ext:
-            ext = ".bin"
+            ext = ".mp4" if atype == "video" else ".bin"
+        saved_name = f"{int(_time.time())}{ext}"
+        saved_path = FILES_DIR / saved_name
 
-        log.info("Splitting %s (%.1f MB) into %d parts (chunk=%d MB)",
-                 filename, total_size / (1024*1024), total_parts,
-                 chunk_size // (1024*1024))
+        # Сохраняем на диск
+        try:
+            saved_path.write_bytes(data)
+            size_mb = len(data) / (1024 * 1024)
+            log.info("Large file saved: %s (%.1f MB)", saved_path, size_mb)
+        except Exception as e:
+            log.error("Failed to save large file: %s", e)
+            # Фоллбэк — текстовое сообщение
+            from telegram.sender import send_to_telegram
+            await send_to_telegram(
+                bot=self._bot, event=event, user=user, chat=chat,
+                max_client=self.get_client(event.tg_user_id),
+            )
+            return
 
-        first_tg_msg_id = None
+        # Формируем ссылку
+        if FILES_URL_BASE:
+            download_url = f"{FILES_URL_BASE}/{saved_name}"
+        else:
+            log.warning("FILES_URL_BASE not set — cannot send download link")
+            download_url = None
 
-        for i in range(total_parts):
-            offset = i * chunk_size
-            chunk = data[offset:offset + chunk_size]
-            part_num = i + 1
-            chunk_filename = f"{base}.part{part_num}{ext}"
+        # Иконка типа медиа
+        icon = {
+            "photo": "🖼", "video": "🎬", "document": "📄",
+            "voice": "🎤", "audio": "🎵",
+        }.get(atype, "📎")
 
-            # Caption: первая часть — оригинальный caption, остальные — пометка
-            if part_num == 1:
-                part_caption = caption
-            else:
-                part_caption = f"[{atype} — часть {part_num}/{total_parts}]"
-                if event.text and part_num == 2:
-                    # Дублируем текст во вторую часть, чтобы он не потерялся
-                    # если первую часть пользователь не увидит
-                    pass
+        size_mb = len(data) / (1024 * 1024)
 
-            buf = BufferedInputFile(chunk, filename=chunk_filename)
+        if download_url:
+            msg_text = (
+                f"{caption}\n\n"
+                f"{icon} <b>{filename}</b> ({size_mb:.1f} МБ)\n"
+                f"Файл слишком большой для Telegram. Скачать: {download_url}"
+            ) if caption else (
+                f"{icon} <b>{filename}</b> ({size_mb:.1f} МБ)\n"
+                f"Файл слишком большой для Telegram. Скачать: {download_url}"
+            )
+        else:
+            msg_text = (
+                f"{caption}\n\n"
+                f"{icon} <b>{filename}</b> ({size_mb:.1f} МБ)\n"
+                f"<i>Файл слишком большой для отправки. FILES_URL_BASE не настроен.</i>"
+            ) if caption else (
+                f"{icon} <b>{filename}</b> ({size_mb:.1f} МБ)\n"
+                f"<i>Файл слишком большой для отправки. FILES_URL_BASE не настроен.</i>"
+            )
 
-            try:
-                sent = await _send_with_retry(
-                    bot.send_document,
-                    chat_id=group_id,
-                    message_thread_id=topic_id,
-                    document=buf,
-                    caption=part_caption[:1024] if part_caption else None,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                log.error("Chunk %d/%d send error: %s", part_num, total_parts, e)
-                # Продолжаем отправлять остальные части
-                continue
+        # Отправляем текстовое сообщение со ссылкой
+        from telegram.sender import _send_with_retry
+        sent = await _send_with_retry(
+            bot.send_message,
+            chat_id=group_id,
+            message_thread_id=topic_id,
+            text=msg_text[:4096],
+            parse_mode="HTML",
+            disable_web_page_preview=False,
+        )
 
-            if sent:
-                if first_tg_msg_id is None:
-                    first_tg_msg_id = sent.message_id
-
-            # Пауза между частями чтобы не словить flood
-            await asyncio.sleep(0.5)
-
-        # Сохраняем в БД только первое сообщение (привязка к оригинальному)
-        if first_tg_msg_id:
+        if sent:
             await db.save_message(
                 user_id=user.id, chat_id=chat.id,
                 direction="max_to_tg", timestamp=event.timestamp,
                 max_sender_id=event.max_sender_id,
                 max_msg_id=event.max_msg_id,
-                tg_msg_id=first_tg_msg_id,
+                tg_msg_id=sent.message_id,
                 has_media=event.has_media,
             )
-
-        log.info("Chunked send complete: %d/%d parts sent for %s",
-                 total_parts, total_parts, filename)
 
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────
 
@@ -458,6 +465,32 @@ class BridgeManager:
                 break
             except Exception as e:
                 log.error("Media purge error: %s", e)
+
+    # ── Очистка старых файлов с диска ────────────────────────────────────────
+
+    async def _cleanup_old_files(self):
+        """Периодически удаляет файлы из FILES_DIR старше FILES_MAX_AGE_DAYS."""
+        import time as _time
+
+        while True:
+            try:
+                await asyncio.sleep(86400)  # проверяем раз в сутки
+                cutoff = _time.time() - (FILES_MAX_AGE_DAYS * 86400)
+                removed = 0
+                for f in FILES_DIR.iterdir():
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        try:
+                            f.unlink()
+                            removed += 1
+                        except Exception as e:
+                            log.error("Failed to delete old file %s: %s", f, e)
+                if removed:
+                    log.info("Cleaned up %d old files from %s (max age: %d days)",
+                             removed, FILES_DIR, FILES_MAX_AGE_DAYS)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("File cleanup error: %s", e)
 
 
 # Глобальный экземпляр
