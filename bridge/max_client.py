@@ -171,7 +171,12 @@ class MaxUserClient:
                     media_name  = None
                     if has_media:
                         media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
-
+                        if not media_bytes:
+                            log.warning("[user=%s] media detected (type=%s) but download failed, "
+                                        "falling back to text-only for msg=%s",
+                                        self.tg_user_id, media_type, msg_id)
+                            has_media = False
+                            media_type = None
                     event = BridgeEvent(
                         direction   = "max_to_tg",
                         tg_user_id  = self.tg_user_id,
@@ -197,7 +202,17 @@ class MaxUserClient:
                             m_type = "photo"
                         elif _type == "VIDEO":
                             m_type = "video"
+                        elif _type == "FILE":
+                            m_type = "document"
+                        elif _type == "VOICE":
+                            m_type = "voice"
+                        elif _type == "AUDIO":
+                            m_type = "audio"
+                        elif _type == "STICKER":
+                            m_type = "sticker"
                         else:
+                            log.warning("[user=%s] fwd attach with unknown _type=%s, skipping",
+                                        self.tg_user_id, _type)
                             continue
 
                         media_bytes, media_name = await self._download_fwd_media(attach, fwd_msg, fwd_link, chat_id, msg_id)
@@ -373,6 +388,41 @@ class MaxUserClient:
                     log.warning("[user=%s] fwd video (%s) error: %s", self.tg_user_id, label, e)
 
             log.warning("[user=%s] fwd video: all attempts failed", self.tg_user_id)
+            return None, None
+
+        # ── Файл: нужен FileRequest через API ──
+        if _type == "FILE":
+            file_id = attach.get("fileId", 0)
+            source_msg_id = fwd_msg.get("id")
+            name = attach.get("name")
+            filename = name if name else f"file_{file_id}"
+
+            source_chat_id = None
+            if fwd_link:
+                source_chat_id = fwd_link.get("chatId")
+
+            log.info("[user=%s] fwd file: fileId=%s linkChatId=%s currentChatId=%s srcMsg=%s name=%s",
+                     self.tg_user_id, file_id, source_chat_id, current_chat_id, source_msg_id, filename)
+
+            for try_chat_id, label in [(source_chat_id, "link"), (current_chat_id, "current")]:
+                if not try_chat_id or not source_msg_id or not file_id:
+                    continue
+                try:
+                    req = await self._client.get_file_by_id(
+                        chat_id=int(try_chat_id),
+                        message_id=int(source_msg_id),
+                        file_id=int(file_id))
+                    if req and getattr(req, "url", None):
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    if data:
+                                        return data, filename
+                except Exception as e:
+                    log.warning("[user=%s] fwd file (%s) error: %s", self.tg_user_id, label, e)
+
+            log.warning("[user=%s] fwd file: all attempts failed", self.tg_user_id)
             return None, None
 
         log.warning("[user=%s] no download method for fwd media _type=%s", self.tg_user_id, _type)
