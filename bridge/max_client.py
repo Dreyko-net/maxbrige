@@ -648,7 +648,36 @@ class MaxUserClient:
         except Exception as e:
             log.error("[user=%s] send_video error: %s", self.tg_user_id, e)
             return None
+        
+    async def send_media_group(self, max_chat_id: str, items: list[dict], caption: str = "") -> Optional[str]:
+        """Отправляет группу фото/видео одним сообщением в MAX.
 
+        items: [{"bytes": bytes, "filename": str, "type": "photo"|"video"}, ...]
+        """
+        try:
+            from pymax.files.photo import Photo
+            from pymax.files.video import Video
+
+            attachments = []
+            for item in items:
+                mtype = item["type"]
+                data = item["bytes"]
+                filename = item.get("filename", "")
+                if mtype == "photo":
+                    attachments.append(Photo(raw=data, name=filename or "photo.jpg"))
+                elif mtype == "video":
+                    attachments.append(Video(raw=data, name=filename or "video.mp4"))
+
+            if not attachments:
+                return None
+
+            result = await self._client.send_message(
+                chat_id=int(max_chat_id), text=caption,
+                attachments=attachments)
+            return str(getattr(result, "id", "") or "")
+        except Exception as e:
+            log.error("[user=%s] send_media_group error: %s", self.tg_user_id, e)
+            return None
 
     async def download_file(self, chat_id, message_id, file_id):
         try:

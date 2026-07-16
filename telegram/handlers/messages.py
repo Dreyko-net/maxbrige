@@ -22,6 +22,102 @@ from database import db
 log = logging.getLogger(__name__)
 router = Router()
 
+# ── Буфер для альбомов (media_group_id → данные) ──────────────────────────
+
+_media_group_buffer: dict[str, dict] = {}
+_media_group_timers: dict[str, asyncio.Task] = {}
+
+# Таймаут сброса буфера после последнего сообщения (секунды)
+_MEDIA_GROUP_FLUSH_DELAY = 0.5
+
+
+async def _flush_media_group(media_group_id: str):
+    """Собирает буферизированные элементы альбома в одно событие и отправляет в очередь."""
+    entry = _media_group_buffer.pop(media_group_id, None)
+    _media_group_timers.pop(media_group_id, None)
+    if not entry:
+        return
+
+    items = entry["items"]
+    if not items:
+        return
+
+    # Формируем media_group список
+    album_items = []
+    other_items = []
+
+    for item in items:
+        if item["type"] in ("photo", "video"):
+            album_items.append({
+                "bytes": item["bytes"],
+                "filename": item["filename"],
+                "type": item["type"],
+            })
+        else:
+            other_items.append(item)
+
+    # Caption берём из первого элемента (в TG caption только на первом)
+    caption = entry.get("caption", "")
+
+    # Альбом: фото/видео → одно событие с media_group
+    if album_items:
+        event = BridgeEvent(
+            direction   = "tg_to_max",
+            tg_user_id  = entry["tg_user_id"],
+            max_chat_id = entry["max_chat_id"],
+            text        = caption,
+            timestamp   = entry["timestamp"],
+            tg_msg_id   = entry["tg_msg_ids"][0],
+            media_group = album_items,
+        )
+        await tg_to_max_queue.put(event)
+
+    # Остальные вложения — по одному
+    for i, item in enumerate(other_items):
+        txt = caption if not album_items and i == 0 else ""
+        ev = BridgeEvent(
+            direction   = "tg_to_max",
+            tg_user_id  = entry["tg_user_id"],
+            max_chat_id = entry["max_chat_id"],
+            text        = txt,
+            timestamp   = entry["timestamp"],
+            tg_msg_id   = item.get("tg_msg_id"),
+            has_media   = bool(item.get("bytes")),
+            media_type  = item["type"],
+            media_bytes = item.get("bytes"),
+            media_name  = item.get("filename"),
+        )
+        await tg_to_max_queue.put(ev)
+
+    # Если были только не-альбомные — отправляем текст отдельно если не прикреплён
+    if not album_items and other_items and caption:
+        # текст уже прикреплён к первому other_item
+        pass
+    elif not album_items and not other_items and caption:
+        ev = BridgeEvent(
+            direction   = "tg_to_max",
+            tg_user_id  = entry["tg_user_id"],
+            max_chat_id = entry["max_chat_id"],
+            text        = caption,
+            timestamp   = entry["timestamp"],
+            tg_msg_id   = entry["tg_msg_ids"][0],
+        )
+        await tg_to_max_queue.put(ev)
+
+
+def _schedule_flush(media_group_id: str):
+    """Перезапускает таймер сброса буфера для данного media_group_id."""
+    # Отменяем предыдущий таймер если есть
+    old_task = _media_group_timers.get(media_group_id)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
+    loop = asyncio.get_running_loop()
+    _media_group_timers[media_group_id] = loop.call_later(
+        _MEDIA_GROUP_FLUSH_DELAY,
+        lambda: asyncio.ensure_future(_flush_media_group(media_group_id)),
+    )
+
 
 # ── Пересланные сообщения (из любых чатов/каналов/групп) → MAX ───────────
 
@@ -146,13 +242,11 @@ async def handle_group_media(msg: Message, bot: Bot):
     if not chat:
         return
 
-    # Скачиваем файл
     media_type, file_id, filename = _extract_media(msg)
     media_bytes = await _download_media(bot, file_id, tag="")
 
     if not media_bytes:
         log.error("Download TG media failed, putting text-only event")
-        # Отправляем хотя бы текст в MAX через очередь
         fallback = BridgeEvent(
             direction   = "tg_to_max",
             tg_user_id  = tg_user_id,
@@ -164,6 +258,31 @@ async def handle_group_media(msg: Message, bot: Bot):
         await tg_to_max_queue.put(fallback)
         return
 
+    # ── Альбом: буферизируем по media_group_id ──
+    mg_id = msg.media_group_id
+    if mg_id:
+        if mg_id not in _media_group_buffer:
+            _media_group_buffer[mg_id] = {
+                "tg_user_id": tg_user_id,
+                "max_chat_id": chat.max_chat_id,
+                "caption": msg.caption or "",
+                "timestamp": int(time.time() * 1000),
+                "tg_msg_ids": [],
+                "items": [],
+            }
+        buf = _media_group_buffer[mg_id]
+        buf["items"].append({
+            "type": media_type,
+            "bytes": media_bytes,
+            "filename": filename,
+            "tg_msg_id": msg.message_id,
+        })
+        buf["tg_msg_ids"].append(msg.message_id)
+        # Перезапускаем таймер сброса
+        _schedule_flush(mg_id)
+        return
+
+    # ── Обычное медиа (не альбом) ──
     event = BridgeEvent(
         direction   = "tg_to_max",
         tg_user_id  = tg_user_id,

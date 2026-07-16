@@ -593,6 +593,15 @@ class BridgeManager:
         if not client:
             log.warning("No MAX client for user %s", event.tg_user_id)
             return
+        
+        # Альбом: несколько фото/видео одним сообщением
+        if event.media_group:
+            await client.send_media_group(
+                max_chat_id = event.max_chat_id,
+                items       = event.media_group,
+                caption     = event.text or "",
+            )
+            return
 
         if event.has_media and event.media_bytes:
             if event.media_type == "photo":
