@@ -140,158 +140,142 @@ class MaxUserClient:
                 text      = getattr(msg, "text",      "") or ""
                 msg_id    = str(getattr(msg, "id",    "") or "")
                 chat_id   = str(getattr(msg, "chat_id", "") or "")
-                max_sender_id   = str(getattr(msg, "sender", "") or "")
+                max_sender_id = str(getattr(msg, "sender", "") or "")
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
-                has_media, media_type = _detect_media(msg)
 
                 # ── Пересланные сообщения ──
-                fwd_attaches_list = None
                 fwd_source = None
                 fwd_msg = None
                 fwd_link = None
+                is_forwarded = False
                 if hasattr(msg, "model_extra"):
                     link = msg.model_extra.get("link")
                     if isinstance(link, dict) and link.get("type") == "FORWARD":
                         fwd_link = link
                         fwd_msg = link.get("message", {})
                         fwd_text = fwd_msg.get("text", "") or ""
-                        fwd_attaches = fwd_attaches_list = fwd_msg.get("attaches", [])
                         fwd_source = link.get("chatName") or fwd_msg.get("chatName", "")
-                        if fwd_text or fwd_attaches_list:
+                        if fwd_text or fwd_msg.get("attaches"):
                             text = fwd_text
 
-                # ── Формируем пометку о пересылке ──
+                        is_forwarded = True
+
+                # ── Текст с пометкой о пересылке ──
                 fwd_prefix = ""
                 if fwd_source:
                     fwd_prefix = f"↩️ Переслано из «{fwd_source}»\n"
 
-                # ── Обычное сообщение (не пересылка или пересылка без вложений) ──
-                if not fwd_attaches_list:
-                    media_bytes = None
-                    media_name  = None
-                    if has_media:
-                        media_bytes, media_name = await self._download_live_media(msg, chat_id, msg_id)
-                        if not media_bytes:
-                            log.warning("[user=%s] media detected (type=%s) but download failed, "
-                                        "falling back to text-only for msg=%s",
-                                        self.tg_user_id, media_type, msg_id)
-                            has_media = False
-                            media_type = None
-                    event = BridgeEvent(
-                        direction   = "max_to_tg",
-                        tg_user_id  = self.tg_user_id,
-                        max_chat_id = chat_id,
-                        max_sender_id = max_sender_id,
-                        text        = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text),
-                        timestamp   = timestamp,
-                        max_msg_id  = msg_id,
-                        has_media   = has_media,
-                        media_type  = media_type,
-                        media_bytes = media_bytes,
-                        media_name  = media_name,
-                    )
-                    await max_to_tg_queue.put(event)
-                else:
-                    # ── Пересылка с вложениями: группируем фото/видео в альбом ──
-                    first_text = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text)
+                first_text = fwd_prefix + text if (fwd_prefix and text) else (fwd_prefix or text)
 
-                    album_items = []   # фото/видео → send_media_group
-                    other_items = []   # файлы/голосовые/стикеры → по одному
+                # ── Собираем и скачиваем все вложения ──
+                album_items = []   # photo/video → send_media_group
+                other_items = []   # file/voice/audio/sticker → по одному
 
-                    for attach in fwd_attaches_list:
+                if is_forwarded and fwd_msg and fwd_msg.get("attaches"):
+                    # Пересылка: вложения — сырые dict из model_extra
+                    for attach in fwd_msg["attaches"]:
                         _type = (attach.get("_type") or "").upper()
-                        if _type == "PHOTO":
-                            m_type = "photo"
-                        elif _type == "VIDEO":
-                            m_type = "video"
-                        elif _type == "FILE":
-                            m_type = "document"
-                        elif _type == "VOICE":
-                            m_type = "voice"
-                        elif _type == "AUDIO":
-                            m_type = "audio"
-                        elif _type == "STICKER":
-                            m_type = "sticker"
-                        else:
-                            log.warning("[user=%s] fwd attach with unknown _type=%s, skipping",
+                        m_type = {
+                            "PHOTO": "photo", "VIDEO": "video", "FILE": "document",
+                            "VOICE": "voice", "AUDIO": "audio", "STICKER": "sticker",
+                        }.get(_type)
+                        if not m_type:
+                            log.warning("[user=%s] attach with unknown _type=%s, skipping",
                                         self.tg_user_id, _type)
                             continue
 
                         media_bytes, media_name = await self._download_fwd_media(
                             attach, fwd_msg, fwd_link, chat_id, msg_id)
 
-                        if _type in ("PHOTO", "VIDEO"):
+                        if m_type in ("photo", "video"):
                             if media_bytes:
                                 album_items.append({
                                     "bytes": media_bytes,
-                                    "filename": media_name or ("photo.jpg" if _type == "PHOTO" else "video.mp4"),
+                                    "filename": media_name or (
+                                        "photo.jpg" if m_type == "photo" else "video.mp4"),
                                     "type": m_type,
                                 })
                         else:
                             other_items.append((m_type, media_bytes, media_name))
 
-                    any_sent = False
+                else:
+                    # Обычное сообщение: вложения — pymax объекты
+                    from telegram.sender import extract_all_attachments
+                    all_attaches = extract_all_attachments(msg)
+                    for att_info in all_attaches:
+                        m_type = att_info["type"]
+                        if m_type in ("share", "contact", "call"):
+                            continue
+                        media_bytes, media_name = await self._download_by_info(
+                            att_info, chat_id, msg_id)
+                        if m_type in ("photo", "video"):
+                            if media_bytes:
+                                album_items.append({
+                                    "bytes": media_bytes,
+                                    "filename": media_name or att_info.get("filename", f"{m_type}.bin"),
+                                    "type": m_type,
+                                })
+                        else:
+                            other_items.append((m_type, media_bytes, media_name))
 
-                    # Альбом: несколько фото/видео одним сообщением
-                    if album_items:
-                        event = BridgeEvent(
-                            direction   = "max_to_tg",
-                            tg_user_id  = self.tg_user_id,
-                            max_chat_id = chat_id,
-                            max_sender_id = max_sender_id,
-                            text        = first_text,
-                            timestamp   = timestamp,
-                            max_msg_id  = msg_id,
-                            media_group = album_items,
-                        )
-                        await max_to_tg_queue.put(event)
-                        any_sent = True
+                # ── Диспетчеризация событий ──
+                any_sent = False
 
-                    # Остальные вложения — по одному
-                    for i, (m_type, media_bytes, media_name) in enumerate(other_items):
-                        txt = first_text if not any_sent and i == 0 else ""
-                        event = BridgeEvent(
-                            direction   = "max_to_tg",
-                            tg_user_id  = self.tg_user_id,
-                            max_chat_id = chat_id,
-                            max_sender_id = max_sender_id,
-                            text        = txt,
-                            timestamp   = timestamp,
-                            max_msg_id  = msg_id,
-                            has_media   = bool(media_bytes),
-                            media_type  = m_type,
-                            media_bytes = media_bytes,
-                            media_name  = media_name,
-                        )
-                        await max_to_tg_queue.put(event)
-                        any_sent = True
+                # Альбом: несколько фото/видео одним сообщением
+                if album_items:
+                    event = BridgeEvent(
+                        direction   = "max_to_tg",
+                        tg_user_id  = self.tg_user_id,
+                        max_chat_id = chat_id,
+                        max_sender_id = max_sender_id,
+                        text        = first_text,
+                        timestamp   = timestamp,
+                        max_msg_id  = msg_id,
+                        media_group = album_items,
+                    )
+                    await max_to_tg_queue.put(event)
+                    any_sent = True
 
-                    # Если ничего не скачалось — хотя бы текст
-                    if not any_sent and first_text:
-                        event = BridgeEvent(
-                            direction   = "max_to_tg",
-                            tg_user_id  = self.tg_user_id,
-                            max_chat_id = chat_id,
-                            max_sender_id = max_sender_id,
-                            text        = first_text,
-                            timestamp   = timestamp,
-                            max_msg_id  = msg_id,
-                        )
-                        await max_to_tg_queue.put(event)
+                # Остальные вложения — по одному
+                for i, (m_type, media_bytes, media_name) in enumerate(other_items):
+                    txt = first_text if not any_sent and i == 0 else ""
+                    event = BridgeEvent(
+                        direction   = "max_to_tg",
+                        tg_user_id  = self.tg_user_id,
+                        max_chat_id = chat_id,
+                        max_sender_id = max_sender_id,
+                        text        = txt,
+                        timestamp   = timestamp,
+                        max_msg_id  = msg_id,
+                        has_media   = bool(media_bytes),
+                        media_type  = m_type,
+                        media_bytes = media_bytes,
+                        media_name  = media_name,
+                    )
+                    await max_to_tg_queue.put(event)
+                    any_sent = True
+
+                # Если ничего не отправилось — хотя бы текст
+                if not any_sent and first_text:
+                    event = BridgeEvent(
+                        direction   = "max_to_tg",
+                        tg_user_id  = self.tg_user_id,
+                        max_chat_id = chat_id,
+                        max_sender_id = max_sender_id,
+                        text        = first_text,
+                        timestamp   = timestamp,
+                        max_msg_id  = msg_id,
+                    )
+                    await max_to_tg_queue.put(event)
             except Exception as e:
                 log.error("[user=%s] handle_message error: %s", self.tg_user_id, e)
     
-    async def _download_live_media(self, msg, chat_id: str, msg_id: str) -> tuple[bytes | None, str | None]:
-        """Скачивает медиа из входящего сообщения MAX для живой пересылки в TG.
+    async def _download_by_info(self, attach_info: dict, chat_id: str, msg_id: str) -> tuple[bytes | None, str | None]:
+        """Скачивает медиа по информации из extract_single_attach.
 
         Возвращает (media_bytes, media_name) или (None, None) при ошибке.
         """
         import aiohttp
-        from telegram.sender import extract_attachment
-
-        attach_info = extract_attachment(msg)
-        if not attach_info:
-            return None, None
 
         atype = attach_info["type"]
         url   = attach_info.get("url")
@@ -308,9 +292,9 @@ class MaxUserClient:
                             data = await resp.read()
                             if data:
                                 return data, filename
-                log.warning("[user=%s] download live media (url) failed: status=%s", self.tg_user_id, resp.status)
+                log.warning("[user=%s] download (url) failed: status=%s", self.tg_user_id, resp.status)
             except Exception as e:
-                log.error("[user=%s] download live media (url) error: %s", self.tg_user_id, e)
+                log.error("[user=%s] download (url) error: %s", self.tg_user_id, e)
             return None, None
 
         # Видео — нужен VideoRequest
@@ -329,7 +313,7 @@ class MaxUserClient:
                                 if data:
                                     return data, filename
             except Exception as e:
-                log.error("[user=%s] download live video error: %s", self.tg_user_id, e)
+                log.error("[user=%s] download video error: %s", self.tg_user_id, e)
             return None, None
 
         # Файл — нужен FileRequest
@@ -348,10 +332,10 @@ class MaxUserClient:
                                 if data:
                                     return data, filename
             except Exception as e:
-                log.error("[user=%s] download live file error: %s", self.tg_user_id, e)
+                log.error("[user=%s] download file error: %s", self.tg_user_id, e)
             return None, None
 
-        log.warning("[user=%s] no download method for live media type=%s", self.tg_user_id, atype)
+        log.warning("[user=%s] no download method for type=%s", self.tg_user_id, atype)
         return None, None
     
     async def _download_fwd_media(self, attach: dict, fwd_msg: dict, fwd_link: dict, current_chat_id: str, current_msg_id: str) -> tuple[bytes | None, str | None]:
