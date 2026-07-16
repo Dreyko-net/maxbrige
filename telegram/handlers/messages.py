@@ -109,14 +109,18 @@ def _schedule_flush(media_group_id: str):
     """Перезапускает таймер сброса буфера для данного media_group_id."""
     # Отменяем предыдущий таймер если есть
     old_task = _media_group_timers.get(media_group_id)
-    if old_task and not old_task.done():
+    if old_task:
         old_task.cancel()
 
-    loop = asyncio.get_running_loop()
-    _media_group_timers[media_group_id] = loop.call_later(
-        _MEDIA_GROUP_FLUSH_DELAY,
-        lambda: asyncio.ensure_future(_flush_media_group(media_group_id)),
-    )
+    async def _delayed_flush():
+        try:
+            await asyncio.sleep(_MEDIA_GROUP_FLUSH_DELAY)
+            await _flush_media_group(media_group_id)
+        except asyncio.CancelledError:
+            pass
+
+    _media_group_timers[media_group_id] = asyncio.create_task(_delayed_flush())
+
 
 
 # ── Пересланные сообщения (из любых чатов/каналов/групп) → MAX ───────────
