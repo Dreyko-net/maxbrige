@@ -277,16 +277,19 @@ class Database:
         max_msg_id: Optional[str] = None,
         tg_msg_id: Optional[int] = None,
         has_media: bool = False,
-    ) -> int:
+    ) -> int | None:
+        """Сохраняет сообщение. Дубликаты по (user_id, chat_id, max_msg_id) игнорируются.
+        Возвращает id записи или None если сообщение уже существует."""
         cur = await self._db.execute(
             """INSERT INTO messages
                (user_id, chat_id, max_sender_id, max_msg_id, tg_msg_id, direction, has_media, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, chat_id, max_msg_id) DO NOTHING""",
             (user_id, chat_id, max_sender_id, max_msg_id, tg_msg_id, direction,
              int(has_media), timestamp),
         )
         await self._db.commit()
-        return cur.lastrowid
+        return cur.lastrowid  # None если дубликат
 
     async def get_message_by_tg(self, tg_msg_id: int) -> Optional[Message]:
         async with self._db.execute(
