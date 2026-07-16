@@ -303,15 +303,16 @@ class MaxUserClient:
             if not video_id or not int_chat_id:
                 return None, None
             try:
-                req = await self._client.get_video_by_id(
-                    chat_id=int_chat_id, message_id=int_msg_id, video_id=int(video_id))
-                if req and getattr(req, "url", None):
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(req.url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                            if resp.status == 200:
-                                data = await resp.read()
-                                if data:
-                                    return data, filename
+                video_url = await self._get_video_url_raw(
+                    int_chat_id, int_msg_id, int(video_id))
+                if video_url:
+                    async with aiohttp.TCPConnector(ssl=False) as conn:
+                        async with aiohttp.ClientSession(connector=conn) as session:
+                            async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    if data:
+                                        return data, filename
             except Exception as e:
                 log.error("[user=%s] download video error: %s", self.tg_user_id, e)
             return None, None
