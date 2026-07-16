@@ -349,8 +349,8 @@ class MaxUserClient:
             if fwd_link:
                 source_chat_id = fwd_link.get("chatId")
 
-            log.info("[user=%s] fwd video: videoId=%s linkChatId=%s currentChatId=%s srcMsg=%s",
-                     self.tg_user_id, video_id, source_chat_id, current_chat_id, source_msg_id)
+            # log.info("[user=%s] fwd video: videoId=%s linkChatId=%s currentChatId=%s srcMsg=%s",
+            #          self.tg_user_id, video_id, source_chat_id, current_chat_id, source_msg_id)
 
             # Пробуем скачать видео — сначала с chatId из link, потом с текущим chat_id
             for try_chat_id, label in [(source_chat_id, "link"), (current_chat_id, "current")]:
@@ -399,7 +399,7 @@ class MaxUserClient:
             payload=payload,
         )
         raw = response.payload if hasattr(response, "payload") else None
-        log.info("[user=%s] raw VIDEO_PLAY payload: %s", self.tg_user_id, raw)
+        # log.info("[user=%s] raw VIDEO_PLAY payload: %s", self.tg_user_id, raw)
         return self._extract_video_url(raw, video_id)
 
     def _extract_video_url(self, raw: dict | None, video_id: int) -> str | None:
