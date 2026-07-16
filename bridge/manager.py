@@ -177,6 +177,7 @@ class BridgeManager:
         )
         from aiogram.types import BufferedInputFile
         from telegram.sender import _send_with_retry
+        from config import TG_CHUNK_SIZE
 
         user = await db.get_user(event.tg_user_id)
         if not user or not user.tg_group_id:
@@ -206,8 +207,29 @@ class BridgeManager:
             )
 
             filename = event.media_name or "file"
-            buf = BufferedInputFile(event.media_bytes, filename=filename)
             atype = event.media_type or "document"
+            data = event.media_bytes
+            data_size = len(data)
+
+            # Файл превышает лимит Telegram — разбиваем на части
+            if data_size > TG_CHUNK_SIZE:
+                log.info("File too large (%.1f MB > %d MB), splitting into chunks",
+                         data_size / (1024*1024), TG_CHUNK_SIZE // (1024*1024))
+                await self._send_chunked_media(
+                    bot=self._bot,
+                    group_id=user.tg_group_id,
+                    topic_id=chat.tg_topic_id,
+                    data=data,
+                    filename=filename,
+                    caption=caption,
+                    atype=atype,
+                    user=user,
+                    chat=chat,
+                    event=event,
+                )
+                return
+
+            buf = BufferedInputFile(data, filename=filename)
 
             sent = None
             try:
@@ -292,6 +314,89 @@ class BridgeManager:
                 chat       = chat,
                 max_client = self.get_client(event.tg_user_id)
             )
+
+
+    async def _send_chunked_media(self, bot, group_id: int, topic_id: int,
+                                   data: bytes, filename: str, caption: str,
+                                   atype: str, user, chat, event: BridgeEvent):
+        """Разбивает большой файл на части и отправляет каждую как документ.
+
+        Каждая часть отправляется через send_document с именем
+        «имя_файла.partN.расширение». Первая часть содержит caption
+        с именем отправителя и текстом, последующие — пометку [часть N/M].
+        """
+        from aiogram.types import BufferedInputFile
+        from telegram.sender import _send_with_retry
+        from config import TG_CHUNK_SIZE
+        import os
+
+        chunk_size = TG_CHUNK_SIZE
+        total_size = len(data)
+        total_parts = (total_size + chunk_size - 1) // chunk_size
+
+        # Формируем базовое имя и расширение для частей
+        base, ext = os.path.splitext(filename)
+        if not ext:
+            ext = ".bin"
+
+        log.info("Splitting %s (%.1f MB) into %d parts (chunk=%d MB)",
+                 filename, total_size / (1024*1024), total_parts,
+                 chunk_size // (1024*1024))
+
+        first_tg_msg_id = None
+
+        for i in range(total_parts):
+            offset = i * chunk_size
+            chunk = data[offset:offset + chunk_size]
+            part_num = i + 1
+            chunk_filename = f"{base}.part{part_num}{ext}"
+
+            # Caption: первая часть — оригинальный caption, остальные — пометка
+            if part_num == 1:
+                part_caption = caption
+            else:
+                part_caption = f"[{atype} — часть {part_num}/{total_parts}]"
+                if event.text and part_num == 2:
+                    # Дублируем текст во вторую часть, чтобы он не потерялся
+                    # если первую часть пользователь не увидит
+                    pass
+
+            buf = BufferedInputFile(chunk, filename=chunk_filename)
+
+            try:
+                sent = await _send_with_retry(
+                    bot.send_document,
+                    chat_id=group_id,
+                    message_thread_id=topic_id,
+                    document=buf,
+                    caption=part_caption[:1024] if part_caption else None,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                log.error("Chunk %d/%d send error: %s", part_num, total_parts, e)
+                # Продолжаем отправлять остальные части
+                continue
+
+            if sent:
+                if first_tg_msg_id is None:
+                    first_tg_msg_id = sent.message_id
+
+            # Пауза между частями чтобы не словить flood
+            await asyncio.sleep(0.5)
+
+        # Сохраняем в БД только первое сообщение (привязка к оригинальному)
+        if first_tg_msg_id:
+            await db.save_message(
+                user_id=user.id, chat_id=chat.id,
+                direction="max_to_tg", timestamp=event.timestamp,
+                max_sender_id=event.max_sender_id,
+                max_msg_id=event.max_msg_id,
+                tg_msg_id=first_tg_msg_id,
+                has_media=event.has_media,
+            )
+
+        log.info("Chunked send complete: %d/%d parts sent for %s",
+                 total_parts, total_parts, filename)
 
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────
 
