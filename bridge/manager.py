@@ -509,7 +509,7 @@ class BridgeManager:
 
         # Формируем ссылку
         if FILES_URL_BASE:
-            download_url = f"{FILES_URL_BASE}/{saved_name}"
+            download_url = f"{FILES_URL_BASE}/{saved_name}?download=true"
         else:
             log.warning("FILES_URL_BASE not set — cannot send download link")
             download_url = None
