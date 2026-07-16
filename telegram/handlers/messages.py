@@ -22,14 +22,17 @@ from database import db
 log = logging.getLogger(__name__)
 router = Router()
 
+
 # ── Буфер для альбомов (media_group_id → данные) ──────────────────────────
 
 _media_group_buffer: dict[str, dict] = {}
 _media_group_timers: dict[str, asyncio.Task] = {}
 
+# Таймаут сброса буфера после последнего сообщения (секунды)
 # Должен быть достаточно большим, чтобы видео успели скачаться (до 5с).
 # Для фото-альбомов добавляется небольшая задержка, но это допустимо.
 _MEDIA_GROUP_FLUSH_DELAY = 5
+
 
 async def _flush_media_group(media_group_id: str):
     """Собирает буферизированные элементы альбома в одно событие и отправляет в очередь."""
@@ -122,7 +125,6 @@ def _schedule_flush(media_group_id: str):
     _media_group_timers[media_group_id] = asyncio.create_task(_delayed_flush())
 
 
-
 # ── Пересланные сообщения (из любых чатов/каналов/групп) → MAX ───────────
 
 @router.message(F.forward_origin, ~F.message_thread_id)
@@ -167,8 +169,12 @@ async def handle_forwarded_media(msg: Message, bot: Bot):
         return
 
     # Скачиваем медиа
-    media_bytes = await _download_media(bot, file_id, tag="[forwarded]")
+    media_bytes, too_big = await _download_media(bot, file_id, tag="[forwarded]")
 
+    if too_big:
+        await msg.answer("⚠️ Файл слишком большой (>20 МБ) для пересылки через бота."
+                         "Требуется Local Bot API для файлов такого размера.")
+        return
     if not media_bytes:
         log.error("[forwarded] Download media failed")
         await msg.answer("❌ Не удалось скачать файл из Telegram.")
@@ -247,7 +253,24 @@ async def handle_group_media(msg: Message, bot: Bot):
         return
 
     media_type, file_id, filename = _extract_media(msg)
-    media_bytes = await _download_media(bot, file_id, tag="")
+    media_bytes, too_big = await _download_media(bot, file_id, tag="")
+
+    if too_big:
+        # Файл >20МБ — отправляем уведомление в MAX
+        file_size_str = _get_file_size_str(msg)
+        notice = f"⚠️ Файл {filename} ({file_size_str}) слишком большой для пересылки (>20 МБ)"
+        if msg.caption:
+            notice = f"{msg.caption}\n{notice}"
+        fallback = BridgeEvent(
+            direction   = "tg_to_max",
+            tg_user_id  = tg_user_id,
+            max_chat_id = chat.max_chat_id,
+            text        = notice,
+            timestamp   = int(time.time() * 1000),
+            tg_msg_id   = msg.message_id,
+        )
+        await tg_to_max_queue.put(fallback)
+        return
 
     if not media_bytes:
         log.error("Download TG media failed, putting text-only event")
@@ -310,16 +333,30 @@ async def _find_owner(tg_group_id: int) -> int | None:
 
 
 
-async def _download_media(bot: Bot, file_id: str, tag: str = "") -> bytes | None:
+async def _download_media(bot: Bot, file_id: str, tag: str = "") -> tuple[bytes | None, str | None]:
     """Скачивает файл из Telegram.
-    Сначала пробует обычный способ (для маленьких файлов).
-    При обрыве — докачивает чанками по 4МБ через HTTP Range.
+
+    Возвращает (bytes, None) при успехе.
+    Возвращает (None, "too_big") если файл >20МБ (getFile не работает).
+    Возвращает (None, None) при других ошибках.
     """
     import aiohttp
+    from aiogram.exceptions import TelegramBadRequest
 
-    file = await bot.get_file(file_id)
+    try:
+        file = await bot.get_file(file_id)
+    except TelegramBadRequest as e:
+        if "too big" in str(e).lower():
+            log.warning("%s File too big for bot API (getFile limit 20MB)", tag)
+            return None, "too_big"
+        log.error("%s get_file bad request: %s", tag, e)
+        return None, None
+    except Exception as e:
+        log.error("%s get_file error: %s", tag, e)
+        return None, None
+
     if not file.file_path:
-        return None
+        return None, None
 
     # Строим URL файла (через прокси бота, если настроен)
     file_url = bot.session.api.file.format(
@@ -334,7 +371,7 @@ async def _download_media(bot: Bot, file_id: str, tag: str = "") -> bytes | None
                 if resp.status == 200:
                     data = await resp.read()
                     if data:
-                        return data
+                        return data, None
     except Exception as e:
         log.warning("%s Normal download failed: %s", tag, e)
 
@@ -343,7 +380,7 @@ async def _download_media(bot: Bot, file_id: str, tag: str = "") -> bytes | None
     return await _download_chunks(file_url, tag)
 
 
-async def _download_chunks(file_url: str, tag: str = "") -> bytes | None:
+async def _download_chunks(file_url: str, tag: str = "") -> tuple[bytes | None, str | None]:
     """Скачивает файл чанками по 4МБ через HTTP Range-запросы."""
     import aiohttp
 
@@ -355,16 +392,16 @@ async def _download_chunks(file_url: str, tag: str = "") -> bytes | None:
         try:
             async with session.head(file_url) as resp:
                 if resp.status != 200:
-                    return None
+                    return None, None
                 total = int(resp.headers.get("Content-Length", 0))
                 accepts_range = resp.headers.get("Accept-Ranges", "") == "bytes"
         except Exception as e:
             log.warning("%s HEAD request failed: %s", tag, e)
-            return None
+            return None, None
 
         if not accepts_range or total <= CHUNK:
             log.warning("%s Range not supported or file too small (%d bytes)", tag, total)
-            return None
+            return None, None
 
         log.info("%s Chunked download: total=%d bytes, chunk=%d", tag, total, CHUNK)
         chunks = []
@@ -379,23 +416,23 @@ async def _download_chunks(file_url: str, tag: str = "") -> bytes | None:
                 ) as resp:
                     if resp.status not in (200, 206):
                         log.warning("%s Chunk %d-%d: status=%d", tag, offset, end, resp.status)
-                        return None
+                        return None, None
                     chunk = await resp.read()
                     if not chunk:
                         log.warning("%s Chunk %d-%d: empty response", tag, offset, end)
-                        return None
+                        return None, None
                     chunks.append(chunk)
                     log.info("%s Chunk %d-%d/%d OK (%d bytes)",
                                 tag, offset, end, total, len(chunk))
             except Exception as e:
                 log.warning("%s Chunk %d-%d failed: %s", tag, offset, end, e)
-                return None
+                return None, None
 
             offset = end + 1
 
     result = b"".join(chunks)
     log.info("%s Download complete: %d bytes", tag, len(result))
-    return result
+    return result, None
 
 def _extract_media(msg: Message) -> tuple[str, str, str]:
     """Возвращает (media_type, file_id, filename)."""
@@ -410,3 +447,23 @@ def _extract_media(msg: Message) -> tuple[str, str, str]:
     if msg.audio:
         return "audio", msg.audio.file_id, msg.audio.file_name or "audio.mp3"
     return "", "", ""
+
+
+def _get_file_size_str(msg: Message) -> str:
+    """Возвращает размер файла в читаемом виде из TG сообщения."""
+    size = 0
+    if msg.video and msg.video.file_size:
+        size = msg.video.file_size
+    elif msg.document and msg.document.file_size:
+        size = msg.document.file_size
+    elif msg.audio and msg.audio.file_size:
+        size = msg.audio.file_size
+    elif msg.voice and msg.voice.file_size:
+        size = msg.voice.file_size
+    elif msg.photo and msg.photo and msg.photo[-1].file_size:
+        size = msg.photo[-1].file_size
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} МБ"
+    elif size >= 1024:
+        return f"{size / 1024:.0f} КБ"
+    return f"{size} Б"
