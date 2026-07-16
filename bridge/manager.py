@@ -363,6 +363,7 @@ class BridgeManager:
         group_items = []   # Для send_media_group
         large_items = []   # Для отдельных ссылок
 
+        is_first = True
         for item in event.media_group:
             data = item["bytes"]
             filename = item["filename"]
@@ -373,20 +374,18 @@ class BridgeManager:
                 continue
 
             buf = BufferedInputFile(data, filename=filename)
+            cap = caption[:1024] if (is_first and caption) else None
+            pm = "HTML" if cap else None
             if mtype == "photo":
-                group_items.append(InputMediaPhoto(media=buf))
+                group_items.append(InputMediaPhoto(media=buf, caption=cap, parse_mode=pm))
             else:
-                group_items.append(InputMediaVideo(media=buf))
+                group_items.append(InputMediaVideo(media=buf, caption=cap, parse_mode=pm))
+            is_first = False
 
         first_tg_msg_id = None
 
         # Отправляем альбом
         if group_items:
-            # Caption — только на первый элемент
-            if caption:
-                group_items[0].caption = caption[:1024]
-                group_items[0].parse_mode = "HTML"
-
             # send_media_group возвращает list[Message], а не Message
             for attempt in range(3):
                 try:
