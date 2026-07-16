@@ -362,12 +362,13 @@ class MaxUserClient:
                     log.info("[user=%s] fwd video (%s) url=%s",
                              self.tg_user_id, label, video_url)
                     if video_url:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                                if resp.status == 200:
-                                    data = await resp.read()
-                                    if data:
-                                        return data, filename
+                        async with aiohttp.TCPConnector(ssl=False) as conn:
+                            async with aiohttp.ClientSession(connector=conn) as session:
+                                async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.read()
+                                        if data:
+                                            return data, filename
                 except Exception as e:
                     log.warning("[user=%s] fwd video (%s) error: %s", self.tg_user_id, label, e)
 
@@ -378,54 +379,45 @@ class MaxUserClient:
         return None, None
 
     async def _get_video_url_raw(self, chat_id: int, message_id: int, video_id: int) -> str | None:
-        """Получает URL видео через сырой invoke, обходя валидацию VideoRequest.
+        """Получает URL видео, обрабатывая случай когда url приходит как список.
 
-        Для пересланных видео MAX API возвращает url как список доменов,
-        а VideoRequest.url: str → ValidationError. Поэтому используем
-        client._app.invoke(Opcode.VIDEO_PLAY) напрямую — тот же механизм
-        что и get_video_by_id, но без parse_payload_model.
+        Стандартный get_video_by_id падает с ValidationError когда MAX API
+        возвращает url как список доменов. Используем тот же payload и invoke,
+        но парсим ответ вручную вместо parse_payload_model(VideoRequest).
         """
         from pymax.protocol.enums import Opcode
+        from pymax.api.messages.payloads import GetVideoPayload
 
-        # Сначала стандартный путь (для обычных видео url — строка)
-        try:
-            req = await self._client.get_video_by_id(
-                chat_id=chat_id, message_id=message_id, video_id=video_id)
-            if req and getattr(req, "url", None):
-                return req.url
-        except Exception:
-            pass  # Ожидаемо для пересланных видео
+        payload = GetVideoPayload(
+            chat_id=chat_id,
+            message_id=message_id,
+            video_id=video_id,
+        ).to_payload()
 
-        # Сырой запрос — получаем payload dict без валидации Pydantic
         response = await self._client._app.invoke(
             opcode=Opcode.VIDEO_PLAY,
-            payload={
-                "chatId": chat_id,
-                "messageId": str(message_id),
-                "videoId": video_id,
-            },
+            payload=payload,
         )
         raw = response.payload if hasattr(response, "payload") else None
         log.info("[user=%s] raw VIDEO_PLAY payload: %s", self.tg_user_id, raw)
         return self._extract_video_url(raw, video_id)
 
     def _extract_video_url(self, raw: dict | None, video_id: int) -> str | None:
-        """Извлекает URL видео из сырого payload VIDEO_PLAY.
+        """Извлекает прямой MP4 URL из payload VIDEO_PLAY.
 
-        Форматы ответа:
-        1) url: "https://..." — готовый URL
-        2) url: ["domain"] + другой ключ с токеном — склеиваем
-        3) Произвольный ключ (не EXTERNAL/cache/url) — как unwrap_dynamic_url
+        Payload может содержать ключи: MP4_1080, MP4_720, HLS, DASH, EXTERNAL и др.
+        Приоритет: MP4_* (прямой файл) > url (строка) > url (список доменов).
         """
         if not raw or not isinstance(raw, dict):
             return None
 
-        # 1) url — готовая строка
-        url_val = raw.get("url")
-        if isinstance(url_val, str) and url_val:
-            return url_val
+        # 1) Прямой MP4 URL — лучший вариант (готовый видеофайл)
+        for key in sorted(raw.keys()):
+            if key.upper().startswith("MP4") and isinstance(raw[key], str) and raw[key]:
+                log.info("[user=%s] using %s url", self.tg_user_id, key)
+                return raw[key]
 
-        # 2) url — список доменов, ищем токен в других ключах
+        # 3) url — список доменов, склеиваем с токеном из другого ключа
         if isinstance(url_val, list) and url_val:
             domain = url_val[0]
             token = ""
@@ -439,7 +431,7 @@ class MaxUserClient:
             log.info("[user=%s] constructed url: %s", self.tg_user_id, result)
             return result
 
-        # 3) Произвольный ключ с URL (как unwrap_dynamic_url в VideoRequest)
+        # 4) Fallback: первая строка-значение (кроме служебных ключей)
         for key, val in raw.items():
             if key.lower() in ("external", "cache", "url"):
                 continue
