@@ -27,9 +27,9 @@ router = Router()
 _media_group_buffer: dict[str, dict] = {}
 _media_group_timers: dict[str, asyncio.Task] = {}
 
-# Таймаут сброса буфера после последнего сообщения (секунды)
-_MEDIA_GROUP_FLUSH_DELAY = 0.5
-
+# Должен быть достаточно большим, чтобы видео успели скачаться (до 5с).
+# Для фото-альбомов добавляется небольшая задержка, но это допустимо.
+_MEDIA_GROUP_FLUSH_DELAY = 5
 
 async def _flush_media_group(media_group_id: str):
     """Собирает буферизированные элементы альбома в одно событие и отправляет в очередь."""
