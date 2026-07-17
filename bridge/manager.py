@@ -625,12 +625,6 @@ class BridgeManager:
             f"💬 Новый чат: <b>{chat_title}</b>\nТема создана."
         )
 
-        # Фоновая синхронизация истории за последние 5 минут
-        from_ts = int((time.time() - 5 * 60) * 1000)
-        asyncio.create_task(
-            _sync_single_chat(self._bot, user, max_client, db_chat, from_ts)
-        )
-
         return db_chat
 
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────
