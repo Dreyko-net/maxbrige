@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from pymax import Client, Message, ExtraConfig
+from pymax.types.domain.chat import Chat as MaxChat
 from pymax.api.session.enums import DeviceType
 
 from bridge.queue import BridgeEvent, max_to_tg_queue
@@ -40,6 +41,7 @@ class MaxUserClient:
         self.me                  = None
         self._ready              = asyncio.Event()
         self._on_session_revoked = None
+        self._on_new_chat: Optional[Callable] = None
 
     def _build_client(self) -> Client:
         Path(self.session_path).mkdir(parents=True, exist_ok=True)
@@ -269,7 +271,21 @@ class MaxUserClient:
                     await max_to_tg_queue.put(event)
             except Exception as e:
                 log.error("[user=%s] handle_message error: %s", self.tg_user_id, e)
-    
+
+        @client.on_chat_update()
+        async def handle_chat_update(chat: MaxChat, _client: Client) -> None:
+            try:
+                chat_id = str(getattr(chat, "id", "") or "")
+                if not chat_id:
+                    return
+                log.info("[user=%s] on_chat_update: chat_id=%s type=%s title=%s",
+                         self.tg_user_id, chat_id, getattr(chat, "type", "?"),
+                         getattr(chat, "title", None))
+                if self._on_new_chat:
+                    await self._on_new_chat(self, chat)
+            except Exception as e:
+                log.error("[user=%s] handle_chat_update error: %s", self.tg_user_id, e)
+
     async def _download_by_info(self, attach_info: dict, chat_id: str, msg_id: str) -> tuple[bytes | None, str | None]:
         """Скачивает медиа по информации из extract_single_attach.
 
