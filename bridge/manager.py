@@ -591,8 +591,11 @@ class BridgeManager:
             return None
 
         max_chat_id = event.max_chat_id
+        if not max_chat_id or not max_chat_id.lstrip('-').isdigit():
+            log.warning("_ensure_chat_and_topic: invalid max_chat_id=%r", max_chat_id)
+            return None
         chat_title = f"Чат {max_chat_id}"
-
+        
         # Пытаемся получить название чата из MAX
         max_client = self.get_client(user.tg_user_id)
         if max_client:

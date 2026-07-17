@@ -140,6 +140,8 @@ class MaxUserClient:
                 text      = getattr(msg, "text",      "") or ""
                 msg_id    = str(getattr(msg, "id",    "") or "")
                 chat_id   = str(getattr(msg, "chat_id", "") or "")
+                if not chat_id or chat_id == "0":
+                    return  # пропускаем системные/некорректные сообщения
                 max_sender_id = str(getattr(msg, "sender", "") or "")
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
 
@@ -606,6 +608,9 @@ class MaxUserClient:
 
     async def send_message(self, max_chat_id: str, text: str, sender_name: Optional[str] = None) -> Optional[str]:
         try:
+            if not max_chat_id or not max_chat_id.lstrip('-').isdigit():
+                log.error("[user=%s] send_message: invalid max_chat_id=%r", self.tg_user_id, max_chat_id)
+                return None
             if sender_name:
                 text = f"{sender_name}: {text}"
             result = await self._client.send_message(
