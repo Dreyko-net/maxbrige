@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from database import db, User, Chat
-from config import HISTORY_DAYS, FLOOD_SLEEP, CONTROL_TOPIC_NAME
+from config import FLOOD_SLEEP
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -31,13 +31,13 @@ log = logging.getLogger(__name__)
 # Медиа тяжелее текста для Telegram API.
 MEDIA_SLEEP: float = float(FLOOD_SLEEP) + 0.5 if FLOOD_SLEEP < 0.5 else float(FLOOD_SLEEP)
 
+# Подготовлен для удаления 2026/07/17 13:48
+# def _today_start_ms() -> int:
+#     d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+#     return int(d.timestamp() * 1000)
 
-def _today_start_ms() -> int:
-    d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(d.timestamp() * 1000)
-
-def _days_ago_ms(days: int) -> int:
-    return int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+# def _days_ago_ms(days: int) -> int:
+#     return int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -249,85 +249,86 @@ class SyncWorker:
                       user.tg_user_id, e, exc_info=True)
             clear_download_cache()  # очищаем даже при ошибке
 
-    async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
-        if not db_chat.tg_topic_id:
-            return
+# Подготовлен для удаления 2026/07/17 13:48
+    # async def _sync_chat(self, user, client, db_chat: Chat, from_ts, to_ts):
+    #     if not db_chat.tg_topic_id:
+    #         return
 
-        messages = await client.get_history(
-            max_chat_id = db_chat.max_chat_id,
-            from_ts     = from_ts,
-            to_ts       = to_ts,
-            limit       = 100,
-        )
-        if not messages:
-            return
+    #     messages = await client.get_history(
+    #         max_chat_id = db_chat.max_chat_id,
+    #         from_ts     = from_ts,
+    #         to_ts       = to_ts,
+    #         limit       = 100,
+    #     )
+    #     if not messages:
+    #         return
 
-        log.info("Syncing %d messages for chat %s (user %s)",
-                 len(messages), db_chat.max_chat_id, user.tg_user_id)
+    #     log.info("Syncing %d messages for chat %s (user %s)",
+    #              len(messages), db_chat.max_chat_id, user.tg_user_id)
 
-        for msg in messages:
-            try:
-                await self._forward_msg_to_tg(user, client, db_chat, msg)
-                await asyncio.sleep(FLOOD_SLEEP)
-            except Exception as e:
-                log.error("Sync message error: %s", e)
+    #     for msg in messages:
+    #         try:
+    #             await self._forward_msg_to_tg(user, client, db_chat, msg)
+    #             await asyncio.sleep(FLOOD_SLEEP)
+    #         except Exception as e:
+    #             log.error("Sync message error: %s", e)
 
-        await db.set_chat_synced(db_chat.id)
+    #     await db.set_chat_synced(db_chat.id)
 
-    async def _forward_msg_to_tg(self, user, client, db_chat: Chat, msg):
-        """Отправка одного сообщения с медиа (используется из _sync_chat)."""
-        from telegram.sender import (
-            format_history_message,
-            send_media_to_telegram_topic,
-            send_text_to_topic,
-        )
-        from bridge.max_client import _detect_media
+    # async def _forward_msg_to_tg(self, user, client, db_chat: Chat, msg):
+    #     """Отправка одного сообщения с медиа (используется из _sync_chat)."""
+    #     from telegram.sender import (
+    #         format_history_message,
+    #         send_media_to_telegram_topic,
+    #         send_text_to_topic,
+    #     )
+    #     from bridge.max_client import _detect_media
 
-        text        = getattr(msg, "text", "") or ""
-        msg_id      = str(getattr(msg, "id", "") or "")
-        timestamp   = getattr(msg, "time", _now_ms())
-        sender      = getattr(msg, "sender", None)
-        sender_name = await client.get_client(sender) if sender else ""
-        has_media, media_type = _detect_media(msg)
+    #     text        = getattr(msg, "text", "") or ""
+    #     msg_id      = str(getattr(msg, "id", "") or "")
+    #     timestamp   = getattr(msg, "time", _now_ms())
+    #     sender      = getattr(msg, "sender", None)
+    #     sender_name = await client.get_client(sender) if sender else ""
+    #     has_media, media_type = _detect_media(msg)
 
-        formatted = format_history_message(
-            sender_name = sender_name,
-            text        = text,
-            timestamp   = timestamp,
-            has_media   = False,   # медиа отправим реальное, не плейсхолдер
-            media_type  = media_type,
-        )
+    #     formatted = format_history_message(
+    #         sender_name = sender_name,
+    #         text        = text,
+    #         timestamp   = timestamp,
+    #         has_media   = False,   # медиа отправим реальное, не плейсхолдер
+    #         media_type  = media_type,
+    #     )
 
-        if has_media:
-            sent_msg = await send_media_to_telegram_topic(
-                bot      = self.bot,
-                group_id = user.tg_group_id,
-                topic_id = db_chat.tg_topic_id,
-                text     = formatted,
-                client   = client,
-                msg      = msg,
-                caption  = text[:1024] if text else "",
-                max_chat_id = db_chat.max_chat_id,
-            )
-        else:
-            sent_msg = await send_text_to_topic(
-                bot      = self.bot,
-                group_id = user.tg_group_id,
-                topic_id = db_chat.tg_topic_id,
-                text     = formatted,
-            )
+    #     if has_media:
+    #         sent_msg = await send_media_to_telegram_topic(
+    #             bot      = self.bot,
+    #             group_id = user.tg_group_id,
+    #             topic_id = db_chat.tg_topic_id,
+    #             text     = formatted,
+    #             client   = client,
+    #             msg      = msg,
+    #             caption  = text[:1024] if text else "",
+    #             max_chat_id = db_chat.max_chat_id,
+    #         )
+    #     else:
+    #         sent_msg = await send_text_to_topic(
+    #             bot      = self.bot,
+    #             group_id = user.tg_group_id,
+    #             topic_id = db_chat.tg_topic_id,
+    #             text     = formatted,
+    #         )
 
-        if sent_msg:
-            msg_db_id = await db.save_message(
-                user_id    = user.id,
-                chat_id    = db_chat.id,
-                direction  = "max_to_tg",
-                timestamp  = timestamp,
-                max_sender_id = sender,
-                max_msg_id = msg_id,
-                tg_msg_id  = sent_msg.message_id,
-                has_media  = has_media,
-            )
+    #     if sent_msg:
+    #         msg_db_id = await db.save_message(
+    #             user_id    = user.id,
+    #             chat_id    = db_chat.id,
+    #             direction  = "max_to_tg",
+    #             timestamp  = timestamp,
+    #             max_sender_id = sender,
+    #             max_msg_id = msg_id,
+    #             tg_msg_id  = sent_msg.message_id,
+    #             has_media  = has_media,
+    #         )
 
     async def _create_topic(self, group_id: int, name: str) -> int | None:
         for attempt in range(5):

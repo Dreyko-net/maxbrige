@@ -291,25 +291,27 @@ class Database:
         await self._db.commit()
         return cur.lastrowid  # None если дубликат
 
-    async def get_message_by_tg(self, tg_msg_id: int) -> Optional[Message]:
-        async with self._db.execute(
-            "SELECT * FROM messages WHERE tg_msg_id=?", (tg_msg_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return _message(row) if row else None
+    # Подготовлен для удаления 2026/07/17 13:46
+    # при удаление удалить в других файлах закоментированные вызовы этих функций
+    # async def get_message_by_tg(self, tg_msg_id: int) -> Optional[Message]:
+    #     async with self._db.execute(
+    #         "SELECT * FROM messages WHERE tg_msg_id=?", (tg_msg_id,)
+    #     ) as cur:
+    #         row = await cur.fetchone()
+    #         return _message(row) if row else None
 
-    async def get_message_by_max(self, max_msg_id: str) -> Optional[Message]:
-        async with self._db.execute(
-            "SELECT * FROM messages WHERE max_msg_id=?", (max_msg_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return _message(row) if row else None
+    # async def get_message_by_max(self, max_msg_id: str) -> Optional[Message]:
+    #     async with self._db.execute(
+    #         "SELECT * FROM messages WHERE max_msg_id=?", (max_msg_id,)
+    #     ) as cur:
+    #         row = await cur.fetchone()
+    #         return _message(row) if row else None
 
-    async def update_tg_msg_id(self, message_id: int, tg_msg_id: int):
-        await self._db.execute(
-            "UPDATE messages SET tg_msg_id=? WHERE id=?", (tg_msg_id, message_id)
-        )
-        await self._db.commit()
+    # async def update_tg_msg_id(self, message_id: int, tg_msg_id: int):
+    #     await self._db.execute(
+    #         "UPDATE messages SET tg_msg_id=? WHERE id=?", (tg_msg_id, message_id)
+    #     )
+    #     await self._db.commit()
 
     async def save_message_dedup(
         self,

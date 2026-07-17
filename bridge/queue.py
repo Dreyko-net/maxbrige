@@ -62,8 +62,9 @@ class MessageQueue:
     def task_done(self) -> None:
         self._q.task_done()
 
-    def qsize(self) -> int:
-        return self._q.qsize()
+# Подготовлен для удаления 2026/07/17 13:48
+    # def qsize(self) -> int:
+    #     return self._q.qsize()
 
 
 # Два канала: MAX→TG и TG→MAX

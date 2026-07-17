@@ -640,39 +640,41 @@ async def send_to_telegram(
 
 # ── Совместимость ─────────────────────────────────────────────────────────
 
-async def send_to_telegram_topic(
-    bot:      Bot,
-    group_id: int,
-    topic_id: int,
-    text:     str,
-    sender_name: Optional[str] = None,
-) -> Optional[TgMessage]:
-    """Отправляет текст в тему супергруппы с retry при flood control.
 
-    УСТАРЕВШАЯ — оставлена для совместимости.
-    Для медиа используй send_media_to_telegram_topic.
-    """
-    for attempt in range(5):
-        try:
-            if sender_name:
-                text = f"{sender_name}: {text}"
-            return await bot.send_message(
-                chat_id           = group_id,
-                message_thread_id = topic_id,
-                text              = text[:4096],
-                parse_mode        = "HTML",
-            )
-        except TelegramRetryAfter as e:
-            wait = e.retry_after + 1
-            log.warning("send_to_telegram_topic flood, waiting %ds (attempt %d)",
-                        wait, attempt + 1)
-            await asyncio.sleep(wait)
-        except TelegramNetworkError as e:
-            wait = 2 ** attempt + 1
-            log.warning("send_to_telegram_topic network error, waiting %ds (attempt %d)",
-                        wait, attempt + 1)
-            await asyncio.sleep(wait)
-        except Exception as e:
-            log.error("send_to_telegram_topic error: %s", e)
-            return None
-    return None
+# Подготовлен для удаления 2026/07/17 13:48
+# async def send_to_telegram_topic(
+#     bot:      Bot,
+#     group_id: int,
+#     topic_id: int,
+#     text:     str,
+#     sender_name: Optional[str] = None,
+# ) -> Optional[TgMessage]:
+#     """Отправляет текст в тему супергруппы с retry при flood control.
+
+#     УСТАРЕВШАЯ — оставлена для совместимости.
+#     Для медиа используй send_media_to_telegram_topic.
+#     """
+#     for attempt in range(5):
+#         try:
+#             if sender_name:
+#                 text = f"{sender_name}: {text}"
+#             return await bot.send_message(
+#                 chat_id           = group_id,
+#                 message_thread_id = topic_id,
+#                 text              = text[:4096],
+#                 parse_mode        = "HTML",
+#             )
+#         except TelegramRetryAfter as e:
+#             wait = e.retry_after + 1
+#             log.warning("send_to_telegram_topic flood, waiting %ds (attempt %d)",
+#                         wait, attempt + 1)
+#             await asyncio.sleep(wait)
+#         except TelegramNetworkError as e:
+#             wait = 2 ** attempt + 1
+#             log.warning("send_to_telegram_topic network error, waiting %ds (attempt %d)",
+#                         wait, attempt + 1)
+#             await asyncio.sleep(wait)
+#         except Exception as e:
+#             log.error("send_to_telegram_topic error: %s", e)
+#             return None
+#     return None
