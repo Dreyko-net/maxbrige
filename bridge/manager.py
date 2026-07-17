@@ -82,7 +82,6 @@ class BridgeManager:
         )
 
         client._on_session_revoked = self._on_session_revoked
-        client._on_new_chat = self._on_new_chat
         log.info("[user=%s] calling client.start()", tg_user_id)
         await client.start()
         log.info("[user=%s] client.start() done, me=%s", tg_user_id, client.me)
@@ -108,7 +107,6 @@ class BridgeManager:
                 session_path = user.session_path,
             )
             client._on_session_revoked = self._on_session_revoked
-            client._on_new_chat = self._on_new_chat
             await client.start()
             self._clients[user.tg_user_id] = client
             log.info("Session restored for user %s", user.tg_user_id)
@@ -165,76 +163,6 @@ class BridgeManager:
             except Exception as e:
                 log.error("[user=%s] notify failed: %s", tg_user_id, e)
 
-    # ── Новый чат в MAX → создать тему в TG ──────────────────────────────────
-
-    async def _on_new_chat(self, client: MaxUserClient, chat_obj):
-        """Колбэк из MaxUserClient при событии on_chat_update.
-
-        Если чат новый (нет маппинга в БД) — создаёт тему в TG
-        и синхронизирует последние сообщения через _sync_single_chat.
-        Если чат уже известен — обновляет заголовок при необходимости.
-        """
-        from bridge.sync_worker import _chat_title as resolve_chat_title
-        from telegram.handlers.commands import _sync_single_chat
-        import time as _time
-
-        user = await db.get_user(client.tg_user_id)
-        if not user or not user.tg_group_id:
-            return
-
-        if not self._sync:
-            log.warning("_on_new_chat called but _sync not ready yet, skipping")
-            return
-
-        max_chat_id = str(getattr(chat_obj, "id", "") or "")
-        if not max_chat_id:
-            return
-
-        # Уже есть маппинг — просто обновляем заголовок
-        existing = await db.get_chat_by_max(user.id, max_chat_id)
-        if existing:
-            new_title = await resolve_chat_title(chat_obj, client)
-            if new_title and new_title != existing.max_chat_title:
-                await db.upsert_chat(user.id, max_chat_id, new_title)
-            return
-
-        # Новый чат — создаём тему
-        chat_title = await resolve_chat_title(chat_obj, client)
-        if not chat_title:
-            chat_title = f"Диалог {max_chat_id}"
-
-        log.info("[user=%s] New chat detected: id=%s title='%s'",
-                 client.tg_user_id, max_chat_id, chat_title)
-
-        db_chat = await db.upsert_chat(user.id, max_chat_id, chat_title)
-
-        topic_id = await self._sync._create_topic(user.tg_group_id, chat_title)
-        if not topic_id:
-            log.error("[user=%s] Failed to create topic for new chat %s",
-                      client.tg_user_id, max_chat_id)
-            return
-
-        await db.set_topic_id(db_chat.id, topic_id)
-        db_chat.tg_topic_id = topic_id
-
-        log.info("[user=%s] Created topic %d for new chat %s '%s'",
-                 client.tg_user_id, topic_id, max_chat_id, chat_title)
-
-        await self._sync._notify(
-            user.tg_group_id,
-            f"💬 Новый чат: <b>{chat_title}</b>\n"
-            f"Тема создана, синхронизирую последние сообщения…"
-        )
-
-        # Ждём 60 сек — окно чтобы live-сообщения успели прийти через on_message
-        await asyncio.sleep(60)
-
-        # Синхронизируем историю за последние 5 минут через существующую функцию
-        from_ts = int((_time.time() - 5 * 60) * 1000)
-        asyncio.create_task(
-            _sync_single_chat(self._bot, user, client, db_chat, from_ts)
-        )
-
     # ── Воркер MAX → Telegram ─────────────────────────────────────────────────
 
     async def _worker_max_to_tg(self):
@@ -264,9 +192,12 @@ class BridgeManager:
 
         chat = await db.get_chat_by_max(user.id, event.max_chat_id)
         if not chat or not chat.tg_topic_id:
-            log.warning("No topic for max_chat_id=%s user=%s",
-                        event.max_chat_id, event.tg_user_id)
-            return
+            # Авто-создание темы для нового чата
+            log.info("[user=%s] No topic for max_chat_id=%s — creating",
+                     event.tg_user_id, event.max_chat_id)
+            chat = await self._ensure_chat_and_topic(user, event)
+            if not chat or not chat.tg_topic_id:
+                return
 
         # ── Альбом: несколько фото/видео в одном сообщении ──
         if event.media_group:
@@ -645,6 +576,62 @@ class BridgeManager:
                 tg_msg_id=sent.message_id,
                 has_media=event.has_media,
             )
+
+    async def _ensure_chat_and_topic(self, user, event: BridgeEvent) -> Optional["Chat"]:
+        """Создаёт тему в TG для неизвестного чата и возвращает db_chat.
+
+        Вызывается из _handle_max_to_tg когда сообщения приходят
+        из чата, которого ещё нет в БД.
+        """
+        from bridge.sync_worker import _chat_title as resolve_chat_title
+        from telegram.handlers.commands import _sync_single_chat
+
+        if not self._sync:
+            log.warning("_ensure_chat_and_topic: _sync not ready")
+            return None
+
+        max_chat_id = event.max_chat_id
+        chat_title = f"Чат {max_chat_id}"
+
+        # Пытаемся получить название чата из MAX
+        max_client = self.get_client(user.tg_user_id)
+        if max_client:
+            try:
+                chats = await max_client.get_chats()
+                for c in chats:
+                    cid = str(getattr(c, "id", "") or "")
+                    if cid == max_chat_id:
+                        chat_title = await resolve_chat_title(c, max_client)
+                        break
+            except Exception as e:
+                log.error("[user=%s] get_chats error: %s", user.tg_user_id, e)
+
+        db_chat = await db.upsert_chat(user.id, max_chat_id, chat_title)
+
+        topic_id = await self._sync._create_topic(user.tg_group_id, chat_title)
+        if not topic_id:
+            log.error("[user=%s] Failed to create topic for chat %s",
+                      user.tg_user_id, max_chat_id)
+            return db_chat
+
+        await db.set_topic_id(db_chat.id, topic_id)
+        db_chat.tg_topic_id = topic_id
+
+        log.info("[user=%s] Auto-created topic %d for chat %s '%s'",
+                 user.tg_user_id, topic_id, max_chat_id, chat_title)
+
+        await self._sync._notify(
+            user.tg_group_id,
+            f"💬 Новый чат: <b>{chat_title}</b>\nТема создана."
+        )
+
+        # Фоновая синхронизация истории за последние 5 минут
+        from_ts = int((time.time() - 5 * 60) * 1000)
+        asyncio.create_task(
+            _sync_single_chat(self._bot, user, max_client, db_chat, from_ts)
+        )
+
+        return db_chat
 
     # ── Воркер Telegram → MAX ─────────────────────────────────────────────────
 
