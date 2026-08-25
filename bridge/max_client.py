@@ -64,12 +64,12 @@ class MaxUserClient:
         self._register_handlers()
 
         # Шаг 1: авторизация + первый логин.
-        # _app.start() завершается после успешного логина.
+        # connect() внутри вызывает _ensure_runtime() + _app.start().
         # Таймаут большой (5 мин) — пользователь может долго вводить SMS.
-        log.info("[user=%s] running _app.start() (auth + login)", self.tg_user_id)
+        log.info("[user=%s] running client.connect() (auth + login)", self.tg_user_id)
         # Без внешнего таймаута — таймаут уже есть в SMS-провайдере (300 сек).
         # wait_for нельзя использовать: он отменяет корутину пока SMS-провайдер ждёт ввода.
-        await self._client._app.start()
+        await self._client.connect()
 
         # Авторизация успешна
         self.me = getattr(self._client, "me", None)
@@ -103,8 +103,7 @@ class MaxUserClient:
             # Соединение оборвалось — переподключаемся
             log.info("[user=%s] connection lost, reconnecting…", self.tg_user_id)
             try:
-                self._client._reset_runtime()
-                await self._client._app.start()
+                await self._client.connect()
                 log.info("[user=%s] reconnected", self.tg_user_id)
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
