@@ -370,6 +370,18 @@ class Database:
             row = await cur.fetchone()
             return _message(row) if row else None
 
+    async def get_message_by_tg_for_user(
+        self, user_id: int, tg_msg_id: int
+    ) -> Optional[Message]:
+        """Ищет сообщение по tg_msg_id в пределах конкретного пользователя."""
+        async with self._db.execute(
+            """SELECT * FROM messages
+               WHERE user_id=? AND tg_msg_id=?""",
+            (user_id, tg_msg_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return _message(row) if row else None
+
     # ── Media cache ───────────────────────────────────────────────────────────
 
     async def save_media(

@@ -13,7 +13,7 @@ import logging
 import time
 
 from aiogram import Router, F, Bot
-from aiogram.types import Message, ContentType
+from aiogram.types import Message, ContentType, MessageReactionUpdated
 
 from bridge.manager import manager
 from bridge.queue import BridgeEvent, tg_to_max_queue
@@ -323,6 +323,27 @@ async def handle_group_media(msg: Message, bot: Bot):
         media_name  = filename,
     )
     await tg_to_max_queue.put(event)
+
+
+# ── Реакции из Telegram → MAX ──────────────────────────────────────────────────
+
+@router.message_reaction(F.chat.type.in_({"supergroup", "group"}))
+async def handle_reaction(event: MessageReactionUpdated, bot: Bot):
+    """Пересылает изменение реакции из Telegram в MAX."""
+    # Пропускаем реакции от самого бота (эхо от MAX→TG)
+    if event.user and event.user.id == bot.id:
+        return
+
+    # Пропускаем если нет user (анонимный администратор)
+    if not event.user:
+        return
+
+    await manager._on_tg_reaction(
+        tg_group_id=event.chat.id,
+        tg_msg_id=event.message_id,
+        new_reactions=event.new_reaction,
+        actor_user_id=event.user.id,
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

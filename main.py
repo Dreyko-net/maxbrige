@@ -66,7 +66,7 @@ async def polling_loop(bot: Bot, dp) -> None:
         try:
             await dp.start_polling(
                 bot,
-                allowed_updates=["message", "callback_query", "my_chat_member"],
+                allowed_updates=["message", "callback_query", "my_chat_member", "message_reaction"],
                 handle_signals=False,       # мы сами управляем остановкой
                 close_bot_session=False,    # не убиваем сессию при переподключении
             )

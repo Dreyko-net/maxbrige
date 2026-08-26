@@ -252,6 +252,89 @@ class BridgeManager:
         except Exception as e:
             log.debug("[user=%s] set_reaction error: %s", tg_user_id, e)
 
+    # ── Реакции Telegram → MAX ─────────────────────────────────────────────────
+
+    # Обратный маппинг: TG emoji → MAX emoji.
+    # Telegram передаёт emoji как есть (строка), MAX принимает такие же.
+    # Для ❤ без variation selector добавляем вариант с ️ на входе.
+    _TG_TO_MAX_REACTION_MAP: dict[str, str] = {
+        v: k for k, v in _REACTION_MAP.items()
+    }
+    # Дополнительно: TG может прислать ❤ без variation selector
+    _TG_TO_MAX_REACTION_MAP["\u2764"] = "\u2764\ufe0f"
+
+    async def _on_tg_reaction(
+        self,
+        tg_group_id: int,
+        tg_msg_id: int,
+        new_reactions: list,
+        actor_user_id: int,
+    ) -> None:
+        """Пересылает реакцию из Telegram в MAX."""
+        # Находим пользователя по группе
+        user = await db.get_user_by_group(tg_group_id)
+        if not user:
+            return
+
+        client = self._clients.get(user.tg_user_id)
+        if not client:
+            return
+
+        # Ищем сообщение по tg_msg_id
+        msg = await db.get_message_by_tg_for_user(user.id, tg_msg_id)
+        if not msg or not msg.max_msg_id:
+            return
+
+        # Ищем чат по id из сообщения
+        chats = await db.get_user_chats(user.id)
+        chat = next((c for c in chats if c.id == msg.chat_id), None)
+        if not chat:
+            return
+
+        max_chat_id = int(chat.max_chat_id)
+        max_msg_id = msg.max_msg_id
+
+        # Извлекаем emoji-реакции (фильтруем только emoji-тип)
+        emoji_list = []
+        for r in new_reactions:
+            rtype = getattr(r, 'type', None)
+            if rtype and rtype.value == 'emoji':
+                emoji = getattr(r, 'emoji', None)
+                if emoji:
+                    emoji_list.append(emoji)
+
+        if not emoji_list:
+            # Реакция удалена — убираем в MAX
+            try:
+                await client.remove_reaction(max_chat_id, max_msg_id)
+                log.debug(
+                    "[user=%s] TG→MAX remove reaction on msg %s",
+                    user.tg_user_id, max_msg_id,
+                )
+            except Exception as e:
+                log.debug("[user=%s] remove_reaction error: %s", user.tg_user_id, e)
+            return
+
+        # Берём первую emoji-реакцию из списка
+        tg_emoji = emoji_list[0]
+        max_emoji = self._TG_TO_MAX_REACTION_MAP.get(tg_emoji)
+        if not max_emoji:
+            # Пробуем передать как есть (может быть юникод-emoji который MAX понимает)
+            if len(tg_emoji) > 1 and not tg_emoji.isascii():
+                max_emoji = tg_emoji
+            else:
+                log.debug("[user=%s] unmapped TG reaction: %r", user.tg_user_id, tg_emoji)
+                return
+
+        try:
+            await client.send_reaction(max_chat_id, max_msg_id, max_emoji)
+            log.debug(
+                "[user=%s] TG→MAX reaction %s on msg %s",
+                user.tg_user_id, max_emoji, max_msg_id,
+            )
+        except Exception as e:
+            log.debug("[user=%s] send_reaction error: %s", user.tg_user_id, e)
+
     # ── Воркер MAX → Telegram ─────────────────────────────────────────────────
 
     async def _worker_max_to_tg(self):

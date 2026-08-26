@@ -132,6 +132,14 @@ class MaxUserClient:
         except Exception:
             pass
 
+    async def send_reaction(self, max_chat_id: int, max_msg_id: str, emoji: str) -> None:
+        """Ставит реакцию в MAX от имени подключённого пользователя."""
+        await self._client.add_reaction(int(max_chat_id), int(max_msg_id), emoji)
+
+    async def remove_reaction(self, max_chat_id: int, max_msg_id: str) -> None:
+        """Удаляет свою реакцию в MAX."""
+        await self._client.remove_reaction(int(max_chat_id), int(max_msg_id))
+
     def _register_handlers(self):
         client = self._client
 
