@@ -82,6 +82,7 @@ class BridgeManager:
         )
 
         client._on_session_revoked = self._on_session_revoked
+        client._on_reaction = self._on_max_reaction
         log.info("[user=%s] calling client.start()", tg_user_id)
         await client.start()
         log.info("[user=%s] client.start() done, me=%s", tg_user_id, client.me)
@@ -107,6 +108,7 @@ class BridgeManager:
                 session_path = user.session_path,
             )
             client._on_session_revoked = self._on_session_revoked
+            client._on_reaction = self._on_max_reaction
             await client.start()
             self._clients[user.tg_user_id] = client
             log.info("Session restored for user %s", user.tg_user_id)
@@ -162,6 +164,93 @@ class BridgeManager:
                 await self._bot.send_message(tg_user_id, msg, parse_mode="HTML")
             except Exception as e:
                 log.error("[user=%s] notify failed: %s", tg_user_id, e)
+
+    # ── Реакции MAX → Telegram ────────────────────────────────────────────────
+
+    # Маппинг реакций MAX → Telegram.
+    # Ключи — то, что приходит в ReactionCounter.reaction из MAX.
+    # Значения — стандартные emoji для Telegram ReactionTypeEmoji.
+    _REACTION_MAP: dict[str, str] = {
+        # Стандартные emoji — проходят как есть
+        "\U0001f44d": "\U0001f44d",   # 👍
+        "\U0001f44e": "\U0001f44e",   # 👎
+        "\u2764\ufe0f": "\u2764",     # ❤️ → ❤ (TG принимает без variation selector)
+        "\U0001f602": "\U0001f602",   # 😂
+        "\U0001f622": "\U0001f622",   # 😢
+        "\U0001f64f": "\U0001f64f",   # 🙏
+        "\U0001f525": "\U0001f525",   # 🔥
+        "\U0001f389": "\U0001f389",   # 🎉
+        "\U0001f914": "\U0001f914",   # 🤔
+        "\U0001f970": "\U0001f970",   # 🤩
+        "\U0001f92a": "\U0001f92a",   # 🤪
+        "\U0001f644": "\U0001f644",   # 🙄
+        "\U0001f60d": "\U0001f60d",   # 😍
+        "\U0001f4a9": "\U0001f4a9",   # 💩
+        "\U0001f4af": "\U0001f4af",   # 💯
+        "\U0001f440": "\U0001f440",   # 👀
+        "\U0001f4ab": "\U0001f4ab",   # ✨
+        "\U0001f631": "\U0001f631",   # 😱
+        "\U0001f608": "\U0001f608",   # 😈
+        "\U0001f495": "\U0001f495",   # 💕
+        "\U0001f49e": "\U0001f49e",   # 💞
+        "\U0001f514": "\U0001f514",   # 🔔
+        "\U0001f44b": "\U0001f44b",   # 👋
+        "\U0001f91d": "\U0001f91d",   # 🤝
+        "\U0001f64c": "\U0001f64c",   # 🙌
+        "\U0001f4aa": "\U0001f4aa",   # 💪
+        "\U0001f680": "\U0001f680",   # 🚀
+        "\U0001f388": "\U0001f388",   # 🎈
+        "\U0001f31f": "\U0001f31f",   # 🌟
+        "\U0001f451": "\U0001f451",   # 👑
+        "\U0001f3b5": "\U0001f3b5",   # 🎵
+    }
+
+    async def _on_max_reaction(self, tg_user_id: int, event) -> None:
+        """Пересылает реакцию из MAX в Telegram."""
+        if not self._bot or not event.counters or event.total_count == 0:
+            return
+
+        user = await db.get_user(tg_user_id)
+        if not user or not user.tg_group_id:
+            return
+
+        # Ищем чат по max_chat_id
+        chat = await db.get_chat_by_max(user.id, str(event.chat_id))
+        if not chat or not chat.tg_topic_id:
+            return
+
+        # Ищем сообщение по max_msg_id → tg_msg_id
+        msg = await db.get_message_by_max_for_user(
+            user.id, chat.id, event.message_id
+        )
+        if not msg or not msg.tg_msg_id:
+            return
+
+        # Берём реакцию с наибольшим count (самая популярная)
+        # Если все счётчики равны — берём первую
+        top = max(event.counters, key=lambda c: c.count)
+        mapped = self._REACTION_MAP.get(top.reaction)
+        if not mapped:
+            # Если MAX присылает юникод-emoji напрямую — пробуем как есть
+            if len(top.reaction) > 1 and not top.reaction.isascii():
+                mapped = top.reaction
+            else:
+                log.debug("[user=%s] unmapped reaction: %r", tg_user_id, top.reaction)
+                return
+
+        try:
+            from aiogram.types import ReactionTypeEmoji
+            await self._bot.set_message_reaction(
+                chat_id=user.tg_group_id,
+                message_id=msg.tg_msg_id,
+                reaction=[ReactionTypeEmoji(emoji=mapped)],
+            )
+            log.debug(
+                "[user=%s] reaction %s on msg %s → tg_msg %s",
+                tg_user_id, mapped, event.message_id, msg.tg_msg_id,
+            )
+        except Exception as e:
+            log.debug("[user=%s] set_reaction error: %s", tg_user_id, e)
 
     # ── Воркер MAX → Telegram ─────────────────────────────────────────────────
 

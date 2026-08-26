@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from pymax import Client, Message, ExtraConfig
 from pymax.api.session.enums import DeviceType
+from pymax.types.events import ReactionUpdateEvent
 
 from bridge.queue import BridgeEvent, max_to_tg_queue
 from config import SESSIONS_DIR
@@ -40,6 +41,7 @@ class MaxUserClient:
         self.me                  = None
         self._ready              = asyncio.Event()
         self._on_session_revoked = None
+        self._on_reaction        = None
 
     def _build_client(self) -> Client:
         Path(self.session_path).mkdir(parents=True, exist_ok=True)
@@ -270,7 +272,15 @@ class MaxUserClient:
                     await max_to_tg_queue.put(event)
             except Exception as e:
                 log.error("[user=%s] handle_message error: %s", self.tg_user_id, e)
-    
+
+        @client.on_reaction_update()
+        async def handle_reaction(event: ReactionUpdateEvent, _client: Client) -> None:
+            try:
+                if self._on_reaction:
+                    await self._on_reaction(self.tg_user_id, event)
+            except Exception as e:
+                log.error("[user=%s] handle_reaction error: %s", self.tg_user_id, e)
+
     async def _download_by_info(self, attach_info: dict, chat_id: str, msg_id: str) -> tuple[bytes | None, str | None]:
         """Скачивает медиа по информации из extract_single_attach.
 
