@@ -528,10 +528,30 @@ async def send_media_to_telegram_topic(
 # ── Вспомогательные функции отправки ──────────────────────────────────────
 
 async def _send_with_retry(func, *, max_retries: int = 3, **kwargs) -> TgMessage | None:
-    """Вызывает функцию отправки с retry при flood control И сетевых ошибках."""
+    """Вызывает функцию отправки с retry при flood control И сетевых ошибках.
+
+    Также проверяет, что сообщение попало в нужный топик:
+    если Telegram молча перенаправил его в другой thread (например General),
+    поднимает TopicNotFoundError.
+    """
+    expected_thread_id = kwargs.get('message_thread_id')
     for attempt in range(max_retries):
         try:
-            return await func(**kwargs)
+            result = await func(**kwargs)
+            # Проверяем, что сообщение попало в нужный топик
+            if (result
+                    and expected_thread_id
+                    and getattr(result, 'message_thread_id', None) is not None
+                    and result.message_thread_id != expected_thread_id):
+                log.warning(
+                    "send: message landed in thread %s instead of expected %s — topic deleted",
+                    result.message_thread_id, expected_thread_id,
+                )
+                raise TopicNotFoundError(
+                    f"message thread not found (posted to thread {result.message_thread_id} "
+                    f"instead of {expected_thread_id})"
+                )
+            return result
         except TelegramRetryAfter as e:
             wait = e.retry_after + 1
             log.warning("send retry (flood), waiting %ds (attempt %d)", wait, attempt + 1)

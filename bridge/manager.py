@@ -425,6 +425,17 @@ class BridgeManager:
                         media=group_items,
                     )
                     if messages:
+                        # Проверяем, что альбом попал в нужный топик
+                        actual_thread = getattr(messages[0], 'message_thread_id', None)
+                        if actual_thread is not None and actual_thread != topic_id:
+                            log.warning(
+                                "send_media_group: landed in thread %s instead of %s — topic deleted",
+                                actual_thread, topic_id,
+                            )
+                            raise TopicNotFoundError(
+                                f"message thread not found (posted to thread {actual_thread} "
+                                f"instead of {topic_id})"
+                            )
                         first_tg_msg_id = messages[0].message_id
                     break
                 except TelegramRetryAfter as e:
