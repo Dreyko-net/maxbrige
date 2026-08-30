@@ -12,7 +12,7 @@ from typing import Optional, TYPE_CHECKING
 import aiohttp
 from aiogram import Bot
 from aiogram.types import BufferedInputFile, Message as TgMessage
-from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError, TelegramBadRequest
 
 from database import db, User, Chat
 from bridge.queue import BridgeEvent
@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from bridge.max_client import MaxUserClient
 
 log = logging.getLogger(__name__)
+
+
+class TopicNotFoundError(Exception):
+    """Топик (message thread) не найден в Telegram — нужен пересоздание."""
+    pass
+
 
 # Внутренний кэш скачанных файлов: {(chat_id, file_id): bytes}
 # Сбрасывается вручную через clear_download_cache()
@@ -512,6 +518,8 @@ async def send_media_to_telegram_topic(
         else:
             return await send_text_to_topic(bot, group_id, topic_id, text)
 
+    except TopicNotFoundError:
+        raise
     except Exception as e:
         log.error("send_media error (type=%s): %s", atype, e)
         return await send_text_to_topic(bot, group_id, topic_id, text)
@@ -534,7 +542,14 @@ async def _send_with_retry(func, *, max_retries: int = 3, **kwargs) -> TgMessage
             log.warning("send retry (network: %s), waiting %ds (attempt %d)",
                         type(e).__name__, wait, attempt + 1)
             await asyncio.sleep(wait)
+        except TelegramBadRequest as e:
+            if "message thread not found" in str(e):
+                raise TopicNotFoundError(str(e)) from e
+            log.error("send error: %s", e)
+            return None
         except Exception as e:
+            if isinstance(e, TopicNotFoundError):
+                raise
             log.error("send error: %s", e)
             return None
     log.error("send failed after %d retries", max_retries)

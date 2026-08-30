@@ -183,6 +183,7 @@ class BridgeManager:
             format_live_message,
             send_text_to_topic,
             _send_with_retry,
+            TopicNotFoundError,
         )
         from aiogram.types import BufferedInputFile
 
@@ -199,159 +200,182 @@ class BridgeManager:
             if not chat or not chat.tg_topic_id:
                 return
 
-        # ── Альбом: несколько фото/видео в одном сообщении ──
-        if event.media_group:
-            max_client = self.get_client(event.tg_user_id)
-            sender_name = ""
-            if max_client and event.max_sender_id:
-                try:
-                    sender_name = await max_client.get_client(event.max_sender_id) or ""
-                except Exception:
-                    pass
-
-            caption = format_live_message(
-                sender_name = sender_name,
-                text        = event.text,
-                has_media   = False,
-                media_type  = None,
-            )
-
-            await self._send_media_group_to_tg(
-                bot=self._bot,
-                group_id=user.tg_group_id,
-                topic_id=chat.tg_topic_id,
-                caption=caption,
-                user=user,
-                chat=chat,
-                event=event,
-            )
-            return
-
-        # Если медиа скачано — отправляем реальным медиа-методом
-        if event.has_media and event.media_bytes:
-            max_client = self.get_client(event.tg_user_id)
-            sender_name = ""
-            if max_client and event.max_sender_id:
-                try:
-                    sender_name = await max_client.get_client(event.max_sender_id) or ""
-                except Exception:
-                    pass
-
-            caption = format_live_message(
-                sender_name = sender_name,
-                text        = event.text,
-                has_media   = False,  # медиа реальное, плейсхолдер не нужен
-                media_type  = event.media_type,
-            )
-
-            filename = event.media_name or "file"
-            atype = event.media_type or "document"
-            data = event.media_bytes
-            data_size = len(data)
-
-            # Файл превышает лимит Telegram — сохраняем на диск и отправляем ссылку
-            if data_size > TG_MAX_FILE_SIZE:
-                log.info("File too large (%.1f MB > %d MB), saving to disk",
-                         data_size / (1024*1024), TG_MAX_FILE_SIZE // (1024*1024))
-                await self._send_large_file_as_link(
-                    bot=self._bot,
-                    group_id=user.tg_group_id,
-                    topic_id=chat.tg_topic_id,
-                    data=data,
-                    filename=filename,
-                    caption=caption,
-                    atype=atype,
-                    user=user,
-                    chat=chat,
-                    event=event,
-                )
-                return
-
-            buf = BufferedInputFile(data, filename=filename)
-
-            sent = None
+        # ── Отправка с автоматическим пересозданием удалённого топика ──
+        for _topic_attempt in range(2):
             try:
-                if atype == "photo":
-                    sent = await _send_with_retry(
-                        self._bot.send_photo,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        photo=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-                elif atype == "video":
-                    sent = await _send_with_retry(
-                        self._bot.send_video,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        video=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-                elif atype == "voice":
-                    sent = await _send_with_retry(
-                        self._bot.send_voice,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        voice=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-                elif atype == "audio":
-                    sent = await _send_with_retry(
-                        self._bot.send_audio,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        audio=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-                elif atype == "sticker":
-                    sent = await _send_with_retry(
-                        self._bot.send_document,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        document=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-                else:
-                    sent = await _send_with_retry(
-                        self._bot.send_document,
-                        chat_id=user.tg_group_id,
-                        message_thread_id=chat.tg_topic_id,
-                        document=buf,
-                        caption=caption[:1024] if caption else None,
-                        parse_mode="HTML",
-                    )
-            except Exception as e:
-                log.error("Live media send error (type=%s): %s", atype, e)
-                # Фоллбэк — текст
-                await send_to_telegram(
-                    bot=self._bot, event=event, user=user, chat=chat,
-                    max_client=self.get_client(event.tg_user_id),
-                )
-                return
+                # ── Альбом: несколько фото/видео в одном сообщении ──
+                if event.media_group:
+                    max_client = self.get_client(event.tg_user_id)
+                    sender_name = ""
+                    if max_client and event.max_sender_id:
+                        try:
+                            sender_name = await max_client.get_client(event.max_sender_id) or ""
+                        except Exception:
+                            pass
 
-            if sent:
-                await db.save_message(
-                    user_id=user.id, chat_id=chat.id,
-                    direction="max_to_tg", timestamp=event.timestamp,
-                    max_sender_id=event.max_sender_id,
-                    max_msg_id=event.max_msg_id,
-                    tg_msg_id=sent.message_id,
-                    has_media=event.has_media,
-                )
-        else:
-            # Без медиа (или не удалось скачать) — текстовый fallback
-            await send_to_telegram(
-                bot        = self._bot,
-                event      = event,
-                user       = user,
-                chat       = chat,
-                max_client = self.get_client(event.tg_user_id)
-            )
+                    caption = format_live_message(
+                        sender_name = sender_name,
+                        text        = event.text,
+                        has_media   = False,
+                        media_type  = None,
+                    )
+
+                    await self._send_media_group_to_tg(
+                        bot=self._bot,
+                        group_id=user.tg_group_id,
+                        topic_id=chat.tg_topic_id,
+                        caption=caption,
+                        user=user,
+                        chat=chat,
+                        event=event,
+                    )
+                    return
+
+                # Если медиа скачано — отправляем реальным медиа-методом
+                if event.has_media and event.media_bytes:
+                    max_client = self.get_client(event.tg_user_id)
+                    sender_name = ""
+                    if max_client and event.max_sender_id:
+                        try:
+                            sender_name = await max_client.get_client(event.max_sender_id) or ""
+                        except Exception:
+                            pass
+
+                    caption = format_live_message(
+                        sender_name = sender_name,
+                        text        = event.text,
+                        has_media   = False,  # медиа реальное, плейсхолдер не нужен
+                        media_type  = event.media_type,
+                    )
+
+                    filename = event.media_name or "file"
+                    atype = event.media_type or "document"
+                    data = event.media_bytes
+                    data_size = len(data)
+
+                    # Файл превышает лимит Telegram — сохраняем на диск и отправляем ссылку
+                    if data_size > TG_MAX_FILE_SIZE:
+                        log.info("File too large (%.1f MB > %d MB), saving to disk",
+                                 data_size / (1024*1024), TG_MAX_FILE_SIZE // (1024*1024))
+                        await self._send_large_file_as_link(
+                            bot=self._bot,
+                            group_id=user.tg_group_id,
+                            topic_id=chat.tg_topic_id,
+                            data=data,
+                            filename=filename,
+                            caption=caption,
+                            atype=atype,
+                            user=user,
+                            chat=chat,
+                            event=event,
+                        )
+                        return
+
+                    buf = BufferedInputFile(data, filename=filename)
+
+                    sent = None
+                    try:
+                        if atype == "photo":
+                            sent = await _send_with_retry(
+                                self._bot.send_photo,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                photo=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                        elif atype == "video":
+                            sent = await _send_with_retry(
+                                self._bot.send_video,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                video=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                        elif atype == "voice":
+                            sent = await _send_with_retry(
+                                self._bot.send_voice,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                voice=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                        elif atype == "audio":
+                            sent = await _send_with_retry(
+                                self._bot.send_audio,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                audio=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                        elif atype == "sticker":
+                            sent = await _send_with_retry(
+                                self._bot.send_document,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                document=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                        else:
+                            sent = await _send_with_retry(
+                                self._bot.send_document,
+                                chat_id=user.tg_group_id,
+                                message_thread_id=chat.tg_topic_id,
+                                document=buf,
+                                caption=caption[:1024] if caption else None,
+                                parse_mode="HTML",
+                            )
+                    except TopicNotFoundError:
+                        raise
+                    except Exception as e:
+                        log.error("Live media send error (type=%s): %s", atype, e)
+                        # Фоллбэк — текст
+                        await send_to_telegram(
+                            bot=self._bot, event=event, user=user, chat=chat,
+                            max_client=self.get_client(event.tg_user_id),
+                        )
+                        return
+
+                    if sent:
+                        await db.save_message(
+                            user_id=user.id, chat_id=chat.id,
+                            direction="max_to_tg", timestamp=event.timestamp,
+                            max_sender_id=event.max_sender_id,
+                            max_msg_id=event.max_msg_id,
+                            tg_msg_id=sent.message_id,
+                            has_media=event.has_media,
+                        )
+                else:
+                    # Без медиа (или не удалось скачать) — текстовый fallback
+                    await send_to_telegram(
+                        bot        = self._bot,
+                        event      = event,
+                        user       = user,
+                        chat       = chat,
+                        max_client = self.get_client(event.tg_user_id)
+                    )
+
+                break  # Успешная отправка — выходим из цикла ретрая
+
+            except TopicNotFoundError:
+                if _topic_attempt == 0:
+                    log.warning(
+                        "[user=%s] Topic %s not found in Telegram for max_chat_id=%s, recreating...",
+                        event.tg_user_id, chat.tg_topic_id, event.max_chat_id,
+                    )
+                    chat = await self._ensure_chat_and_topic(user, event)
+                    if not chat or not chat.tg_topic_id:
+                        log.error("[user=%s] Failed to recreate topic, dropping message",
+                                  event.tg_user_id)
+                        return
+                else:
+                    log.error("[user=%s] Topic still not found after recreation, dropping message",
+                              event.tg_user_id)
+
 
     async def _send_media_group_to_tg(self, bot, group_id: int, topic_id: int,
                                        caption: str, user, chat, event: BridgeEvent):
@@ -362,7 +386,7 @@ class BridgeManager:
         """
         from aiogram.types import BufferedInputFile, InputMediaPhoto, InputMediaVideo
         from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError, TelegramBadRequest
-        from telegram.sender import send_text_to_topic, _send_with_retry
+        from telegram.sender import send_text_to_topic, _send_with_retry, TopicNotFoundError
 
         group_items = []   # Для send_media_group
         group_sources = [] # Параллельный список исходных item dicts
@@ -414,9 +438,13 @@ class BridgeManager:
                                 type(e).__name__, wait, attempt + 1)
                     await asyncio.sleep(wait)
                 except TelegramBadRequest as e:
+                    if "message thread not found" in str(e):
+                        raise TopicNotFoundError(str(e)) from e
                     log.warning("send_media_group bad request: %s — falling back to individual send", e)
                     album_failed = True
                     break
+                except TopicNotFoundError:
+                    raise
                 except Exception as e:
                     log.error("send_media_group error: %s — falling back to individual send", e)
                     album_failed = True
@@ -446,6 +474,8 @@ class BridgeManager:
                             chat_id=group_id, message_thread_id=topic_id,
                             video=buf, caption=cap, parse_mode="HTML" if cap else None,
                         )
+                except TopicNotFoundError:
+                    raise
                 except Exception as e:
                     log.warning("individual send failed for %s: %s", filename, e)
                     # Фото с невалидными размерами — пробуем как документ
@@ -457,6 +487,8 @@ class BridgeManager:
                                 chat_id=group_id, message_thread_id=topic_id,
                                 document=buf, caption=cap, parse_mode="HTML" if cap else None,
                             )
+                        except TopicNotFoundError:
+                            raise
                         except Exception as e2:
                             log.warning("document fallback also failed for %s: %s", filename, e2)
                 if sent and not first_tg_msg_id:
@@ -512,6 +544,8 @@ class BridgeManager:
             saved_path.write_bytes(data)
             size_mb = len(data) / (1024 * 1024)
             log.info("Large file saved: %s (%.1f MB)", saved_path, size_mb)
+        except TopicNotFoundError:
+            raise
         except Exception as e:
             log.error("Failed to save large file: %s", e)
             # Фоллбэк — текстовое сообщение
