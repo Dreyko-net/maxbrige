@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-Direction = Literal["max_to_tg", "tg_to_max"]
+Direction = Literal["max_to_tg", "tg_to_max", "read_max_to_tg", "read_tg_to_max"]
 
 
 @dataclass
@@ -34,6 +34,8 @@ class BridgeEvent:
     media_name:  str  | None = None   # имя файла для document
     # альбом: несколько фото/видео в одном сообщении (send_media_group)
     media_group: list[dict] | None = None  # [{"bytes": bytes, "filename": str, "type": "photo"|"video"}]
+    # read receipts
+    read_msg_id: str | None = None  # ID прочитанного сообщения (max_msg_id для read_max_to_tg)
 
 
 

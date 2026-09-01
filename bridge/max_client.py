@@ -144,6 +144,55 @@ class MaxUserClient:
                 max_sender_id = str(getattr(msg, "sender", "") or "")
                 timestamp = getattr(msg, "timestamp", None) or int(time.time() * 1000)
 
+                # ── Read receipt: контрольное сообщение о прочтении ──
+                read_msg_id = None
+                is_control = False
+
+                attaches = getattr(msg, "attaches", None) or []
+                if attaches:
+                    first_attach = attaches[0]
+                    attach_type = getattr(first_attach, "type", None) or ""
+                    if attach_type == "CONTROL":
+                        is_control = True
+                        # Контрольное сообщение — проверяем, это read receipt
+                        read_msg_id = (
+                            getattr(first_attach, "read_msg_id", None)
+                            or getattr(first_attach, "readMsgId", None)
+                            or getattr(msg, "read_msg_id", None)
+                            or getattr(msg, "readMsgId", None)
+                        )
+                        # Также проверяем model_extra на наличие readMsgId
+                        if not read_msg_id and hasattr(msg, "model_extra"):
+                            extra = msg.model_extra or {}
+                            read_msg_id = extra.get("readMsgId") or extra.get("read_msg_id")
+                        if not read_msg_id and hasattr(first_attach, "model_extra"):
+                            extra = first_attach.model_extra or {}
+                            read_msg_id = extra.get("readMsgId") or extra.get("read_msg_id")
+
+                # Fallback: readMsgId может быть на самом сообщении (без attaches, без текста)
+                if not read_msg_id and not attaches and not text:
+                    read_msg_id = (
+                        getattr(msg, "read_msg_id", None)
+                        or getattr(msg, "readMsgId", None)
+                    )
+                    if not read_msg_id and hasattr(msg, "model_extra"):
+                        extra = msg.model_extra or {}
+                        read_msg_id = extra.get("readMsgId") or extra.get("read_msg_id")
+
+                if read_msg_id and (is_control or (not attaches and not text)):
+                    log.debug("[user=%s] read receipt: chat=%s readMsgId=%s",
+                              self.tg_user_id, chat_id, read_msg_id)
+                    event = BridgeEvent(
+                        direction    = "read_max_to_tg",
+                        tg_user_id   = self.tg_user_id,
+                        max_chat_id  = chat_id,
+                        text         = "",
+                        timestamp    = timestamp,
+                        read_msg_id  = str(read_msg_id),
+                    )
+                    await max_to_tg_queue.put(event)
+                    return  # контрольное сообщение обработано
+
                 # ── Пересланные сообщения ──
                 fwd_source = None
                 fwd_msg = None
@@ -682,6 +731,31 @@ class MaxUserClient:
         except Exception as e:
             log.error("[user=%s] send_media_group error: %s", self.tg_user_id, e)
             return None
+
+    async def mark_as_read(self, max_chat_id: str, max_msg_id: str) -> bool:
+        """Отмечает сообщение как прочитанное в MAX.
+
+        Отправляет контрольное сообщение типа READ с readMsgId.
+        """
+        try:
+            from pymax.protocol.enums import Opcode
+            from pymax.api.messages.payloads import ReadPayload
+
+            payload = ReadPayload(
+                chat_id=int(max_chat_id),
+                message_id=int(max_msg_id),
+            ).to_payload()
+
+            await self._client._app.invoke(
+                opcode=Opcode.MESSAGE_READ,
+                payload=payload,
+            )
+            log.debug("[user=%s] mark_as_read: chat=%s msg=%s",
+                      self.tg_user_id, max_chat_id, max_msg_id)
+            return True
+        except Exception as e:
+            log.error("[user=%s] mark_as_read error: %s", self.tg_user_id, e)
+            return False
 
     async def download_file(self, chat_id, message_id, file_id):
         try:

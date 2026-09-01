@@ -170,12 +170,77 @@ class BridgeManager:
         while True:
             try:
                 event = await max_to_tg_queue.get()
-                await self._handle_max_to_tg(event)
+                if event.direction == "read_max_to_tg":
+                    await self._handle_read_max_to_tg(event)
+                else:
+                    await self._handle_max_to_tg(event)
                 max_to_tg_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error("max→tg worker error: %s", e, exc_info=True)
+
+    # ── Read receipt: MAX → Telegram ──────────────────────────────────────────
+
+    async def _handle_read_max_to_tg(self, event: BridgeEvent):
+        """Обрабатывает прочтение в MAX: ставит ✅ реакцию на TG-сообщение.
+
+        MAX сообщает, что сообщение с max_msg_id прочитано.
+        Мы находим соответствующее tg_msg_id и ставим реакцию.
+        """
+        if not event.read_msg_id:
+            return
+
+        user = await db.get_user(event.tg_user_id)
+        if not user or not user.tg_group_id:
+            return
+
+        # Находим chat_id в БД по max_chat_id
+        db_chat_id = await db.get_chat_id_by_max_chat_id(user.id, event.max_chat_id)
+        if not db_chat_id:
+            return
+
+        # Находим tg_msg_id по max_msg_id
+        tg_msg_id = await db.get_tg_msg_id_by_max(
+            user.id, db_chat_id, event.read_msg_id)
+        if not tg_msg_id:
+            return
+
+        try:
+            from aiogram.types import ReactionTypeEmoji
+            await self._bot.set_message_reaction(
+                chat_id=user.tg_group_id,
+                message_id=tg_msg_id,
+                reaction=[ReactionTypeEmoji(emoji="✅")],
+            )
+        except Exception as e:
+            # Reactions may fail (e.g., bot not admin, or message too old)
+            log.debug("[user=%s] set_message_reaction failed for tg_msg=%s: %s",
+                       event.tg_user_id, tg_msg_id, e)
+
+    # ── Read receipt: Telegram → MAX ──────────────────────────────────────────
+
+    async def _send_read_to_max(self, tg_user_id: int, max_chat_id: str):
+        """Отправляет read receipt в MAX для последнего сообщения в чате.
+
+        Вызывается когда пользователь TG отправляет сообщение в топик,
+        что означает что он прочитал все предыдущие сообщения.
+        """
+        client = self.get_client(tg_user_id)
+        if not client:
+            return
+
+        user = await db.get_user(tg_user_id)
+        if not user:
+            return
+
+        db_chat_id = await db.get_chat_id_by_max_chat_id(user.id, max_chat_id)
+        if not db_chat_id:
+            return
+
+        last_max_msg_id = await db.get_last_max_msg_id_for_read(user.id, db_chat_id)
+        if last_max_msg_id:
+            await client.mark_as_read(max_chat_id, last_max_msg_id)
 
     async def _handle_max_to_tg(self, event: BridgeEvent):
         from telegram.sender import (
@@ -702,9 +767,7 @@ class BridgeManager:
                 items       = event.media_group,
                 caption     = event.text or "",
             )
-            return
-
-        if event.has_media and event.media_bytes:
+        elif event.has_media and event.media_bytes:
             if event.media_type == "photo":
                 await client.send_photo(
                     max_chat_id = event.max_chat_id,
@@ -730,6 +793,12 @@ class BridgeManager:
                 max_chat_id = event.max_chat_id,
                 text        = event.text,
             )
+
+        # Отправляем read receipt в MAX: пользователь прочитал предыдущие сообщения
+        try:
+            await self._send_read_to_max(event.tg_user_id, event.max_chat_id)
+        except Exception as e:
+            log.debug("[user=%s] _send_read_to_max error: %s", event.tg_user_id, e)
 
     # ── Очистка медиакэша ─────────────────────────────────────────────────────
 

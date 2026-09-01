@@ -370,6 +370,63 @@ class Database:
             row = await cur.fetchone()
             return _message(row) if row else None
 
+    async def get_tg_msg_id_by_max(
+        self, user_id: int, chat_id: int, max_msg_id: str
+    ) -> Optional[int]:
+        """Возвращает tg_msg_id по max_msg_id (для read receipts MAX→TG)."""
+        async with self._db.execute(
+            """SELECT tg_msg_id FROM messages
+               WHERE user_id=? AND chat_id=? AND max_msg_id=? AND tg_msg_id IS NOT NULL""",
+            (user_id, chat_id, max_msg_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["tg_msg_id"] if row else None
+
+    async def get_max_msg_id_by_tg(
+        self, user_id: int, tg_msg_id: int
+    ) -> Optional[tuple[str, int]]:
+        """Возвращает (max_msg_id, chat_id) по tg_msg_id (для read receipts TG→MAX).
+
+        Возвращает tuple (max_msg_id, chat_id) или None.
+        """
+        async with self._db.execute(
+            """SELECT max_msg_id, chat_id FROM messages
+               WHERE user_id=? AND tg_msg_id=? AND max_msg_id IS NOT NULL""",
+            (user_id, tg_msg_id),
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                return row["max_msg_id"], row["chat_id"]
+            return None
+
+    async def get_chat_id_by_max_chat_id(
+        self, user_id: int, max_chat_id: str
+    ) -> Optional[int]:
+        """Возвращает id записи чата по user_id и max_chat_id."""
+        async with self._db.execute(
+            "SELECT id FROM chats WHERE user_id=? AND max_chat_id=?",
+            (user_id, max_chat_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["id"] if row else None
+
+    async def get_last_max_msg_id_for_read(
+        self, user_id: int, chat_id: int
+    ) -> Optional[str]:
+        """Возвращает max_msg_id последнего сообщения max_to_tg в чате.
+
+        Используется для отправки read receipt в MAX.
+        """
+        async with self._db.execute(
+            """SELECT max_msg_id FROM messages
+               WHERE user_id=? AND chat_id=? AND direction='max_to_tg'
+                 AND max_msg_id IS NOT NULL
+               ORDER BY timestamp DESC LIMIT 1""",
+            (user_id, chat_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["max_msg_id"] if row else None
+
     # ── Media cache ───────────────────────────────────────────────────────────
 
     async def save_media(
